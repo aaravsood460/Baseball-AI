@@ -1,0 +1,11 @@
+# Python environment & cache
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Temporary video files & OS noise
+*.mp4
+*.mov
+*.avi
+.DS_Store
