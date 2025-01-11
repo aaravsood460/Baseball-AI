@@ -57,14 +57,30 @@ if uploaded_file is not None:
         knee_metric = st.empty()
 
     # Initialize MediaPipe Tasks Engine
-    model_path = 'pose_landmarker_full.task'
-    PoseLandmarker = vision.PoseLandmarker
-    PoseLandmarkerOptions = vision.PoseLandmarkerOptions
-    BaseOptions = python.BaseOptions
+import urllib.request
+import os
 
-    options = PoseLandmarkerOptions(
-        base_options=BaseOptions(model_asset_path=model_path),
-        running_mode=vision.RunningMode.VIDEO
+model_path = 'pose_landmarker_full.task'
+if not os.path.exists(model_path) or os.path.getsize(model_path) < 1000000:
+    url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task"
+    urllib.request.urlretrieve(url, model_path)
+
+PoseLandmarker = vision.PoseLandmarker
+PoseLandmarkerOptions = vision.PoseLandmarkerOptions
+BaseOptions = python.BaseOptions
+
+options = PoseLandmarkerOptions(
+    base_options=BaseOptions(model_asset_path=model_path),
+    running_mode=vision.RunningMode.VIDEO
+)
+PoseLandmarker = vision.PoseLandmarker
+PoseLandmarkerOptions = vision.PoseLandmarkerOptions
+BaseOptions = python.BaseOptions
+
+options = PoseLandmarkerOptions(
+    base_options=BaseOptions(model_asset_path=model_path),
+    running_mode=vision.RunningMode.VIDEO
+)
     )
 
     cap = cv2.VideoCapture(video_path)
