@@ -1,15 +1,16 @@
-import streamlit as st
-import cv2
-import mediapipe as mp
-import numpy as np
-import tempfile
 import os
+import urllib.request
+import tempfile
+import cv2
+import numpy as np
+import streamlit as st
+import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
-# --- PAGE CONFIGURATION ---
+# Streamlit Page Setup
 st.set_page_config(
-    page_title="AI Pitching Mechanics Tracker",
+    page_title="AI Pitching Mechanics Analyzer",
     page_icon="⚾",
     layout="wide"
 )
@@ -17,38 +18,59 @@ st.set_page_config(
 st.title("⚾ AI Pitching Mechanics & Biomechanics Analyzer")
 st.write("Upload a baseball pitching video to track skeletal landmarks and analyze joint angles in real-time.")
 
-# --- HELPER: VECTOR ANGLE CALCULATION ---
+# -----------------------------------------------------------------------------
+# 1. Automatic Model Setup
+# -----------------------------------------------------------------------------
+model_path = "pose_landmarker_full.task"
+
+# Download the model dynamically if missing or corrupted on Streamlit Cloud
+if not os.path.exists(model_path) or os.path.getsize(model_path) < 1000000:
+    url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task"
+    urllib.request.urlretrieve(url, model_path)
+
+# Initialize MediaPipe Tasks Engine Options
+PoseLandmarker = vision.PoseLandmarker
+PoseLandmarkerOptions = vision.PoseLandmarkerOptions
+BaseOptions = python.BaseOptions
+
+options = PoseLandmarkerOptions(
+    base_options=BaseOptions(model_asset_path=model_path),
+    running_mode=vision.RunningMode.VIDEO
+)
+
+# -----------------------------------------------------------------------------
+# 2. Biomechanics Helper Functions
+# -----------------------------------------------------------------------------
 def calculate_angle(a, b, c):
-    a, b, c = np.array(a), np.array(b), np.array(c)
-    ba = a - b
-    bc = c - b
-    cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
-    cosine_angle = np.clip(cosine_angle, -1.0, 1.0)
-    return int(np.degrees(np.arccos(cosine_angle)))
-
-# --- SIDEBAR & FILE UPLOADER ---
-st.sidebar.header("⚙️ Settings & Inputs")
-uploaded_file = st.sidebar.file_uploader("Choose a pitching video...", type=["mp4", "mov", "avi"])
-
-POSE_CONNECTIONS = [
-    (11, 12), (11, 13), (13, 15), (12, 14), (14, 16), 
-    (11, 23), (12, 24), (23, 24),                     
-    (23, 25), (25, 27), (24, 26), (26, 28)            
-]
-
-# --- MAIN PROCESSING PIPELINE ---
-if uploaded_file is not None:
-    # Save uploaded file temporarily so OpenCV can read it
-    tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
-    tfile.write(uploaded_file.read())
-    video_path = tfile.name
-
-    # Create layout columns for UI
-    col1, col2 = st.columns(2)
+    """Calculates the 2D angle (in degrees) between three landmark points."""
+    a = np.array(a)  # First joint (e.g., Shoulder)
+    b = np.array(b)  # Middle joint (e.g., Elbow)
+    c = np.array(c)  # End joint (e.g., Wrist)
     
+    radians = np.arctan2(c[1] - b[1], c[0] - b[0]) - np.arctan2(a[1] - b[1], a[0] - b[0])
+    angle = np.abs(radians * 180.0 / np.pi)
+    
+    if angle > 180.0:
+        angle = 360.0 - angle
+        
+    return angle
+
+# -----------------------------------------------------------------------------
+# 3. Streamlit UI Layout & Video Upload
+# -----------------------------------------------------------------------------
+uploaded_file = st.sidebar.file_uploader("Upload Pitching Video", type=["mp4", "mov", "avi"])
+
+if uploaded_file is not None:
+    # Save uploaded file to a temporary file for OpenCV reading
+    tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    tfile.write(uploaded_file.read())
+    tfile.close()
+
+    col1, col2 = st.columns(2)
+
     with col1:
-        st.subheader("📹 AI Processing View")
-        st_frame = st.empty() # Placeholder for video frames
+        st.subheader("📺 AI Processing View")
+        st_frame = st.empty()
 
     with col2:
         st.subheader("📊 Live Biomechanics Metrics")
@@ -56,81 +78,62 @@ if uploaded_file is not None:
         shoulder_metric = st.empty()
         knee_metric = st.empty()
 
-    # Initialize MediaPipe Tasks Engine
-import urllib.request
-import os
+    cap = cv2.VideoCapture(tfile.name)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps == 0 or np.isnan(fps):
+        fps = 30.0
 
-model_path = 'pose_landmarker_full.task'
-if not os.path.exists(model_path) or os.path.getsize(model_path) < 1000000:
-    url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task"
-    urllib.request.urlretrieve(url, model_path)
+    frame_timestamp_ms = 0
 
-PoseLandmarker = vision.PoseLandmarker
-PoseLandmarkerOptions = vision.PoseLandmarkerOptions
-BaseOptions = python.BaseOptions
-
-options = PoseLandmarkerOptions(
-    base_options=BaseOptions(model_asset_path=model_path),
-    running_mode=vision.RunningMode.VIDEO
-)
-PoseLandmarker = vision.PoseLandmarker
-PoseLandmarkerOptions = vision.PoseLandmarkerOptions
-BaseOptions = python.BaseOptions
-
-options = PoseLandmarkerOptions(
-    base_options=BaseOptions(model_asset_path=model_path),
-    running_mode=vision.RunningMode.VIDEO
-)
-    )
-
-    cap = cv2.VideoCapture(video_path)
-
+    # Execute MediaPipe Pose Engine Context Manager
     with PoseLandmarker.create_from_options(options) as landmarker:
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
-                st.success("Analysis Complete!")
                 break
 
-            h, w, _ = frame.shape
-            timestamp_ms = int(cap.get(cv2.CAP_PROP_POS_MSEC))
+            # Convert OpenCV frame BGR -> RGB
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-            results = landmarker.detect_for_video(mp_image, timestamp_ms)
 
-            e_angle, s_angle, k_angle = "N/A", "N/A", "N/A"
+            # Process frame with MediaPipe
+            frame_timestamp_ms = int(cap.get(cv2.CAP_PROP_POS_MSEC))
+            pose_landmarker_result = landmarker.detect_for_video(mp_image, frame_timestamp_ms)
 
-            if results.pose_landmarks:
-                for landmark_list in results.pose_landmarks:
-                    points = {}
-                    for idx, landmark in enumerate(landmark_list):
-                        cx, cy = int(landmark.x * w), int(landmark.y * h)
-                        points[idx] = (cx, cy)
-                        cv2.circle(frame, (cx, cy), 4, (0, 255, 0), -1)
+            # Draw Landmarks & Calculate Angles
+            if pose_landmarker_result.pose_landmarks:
+                landmarks = pose_landmarker_result.pose_landmarks[0]
+                h, w, _ = frame.shape
 
-                    for connection in POSE_CONNECTIONS:
-                        start_idx, end_idx = connection
-                        if start_idx in points and end_idx in points:
-                            cv2.line(frame, points[start_idx], points[end_idx], (0, 0, 255), 2)
+                # Extract Key Landmarks (Right Side Pitcher Example)
+                shoulder = [landmarks[12].x * w, landmarks[12].y * h]
+                elbow = [landmarks[14].x * w, landmarks[14].y * h]
+                wrist = [landmarks[16].x * w, landmarks[16].y * h]
+                hip = [landmarks[24].x * w, landmarks[24].y * h]
+                knee = [landmarks[26].x * w, landmarks[26].y * h]
+                ankle = [landmarks[28].x * w, landmarks[28].y * h]
 
-                    # Calculate joint angles
-                    if 12 in points and 14 in points and 16 in points:
-                        e_angle = calculate_angle(points[12], points[14], points[16])
-                    if 24 in points and 12 in points and 14 in points:
-                        s_angle = calculate_angle(points[24], points[12], points[14])
-                    if 24 in points and 26 in points and 28 in points:
-                        k_angle = calculate_angle(points[24], points[26], points[28])
+                # Compute Joint Angles
+                elbow_angle = calculate_angle(shoulder, elbow, wrist)
+                knee_angle = calculate_angle(hip, knee, ankle)
 
-            # Display updated video frame in Column 1
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            st_frame.image(frame_rgb, channels="RGB", use_container_width=True)
+                # Draw Overlay Skeletons
+                cv2.line(frame, (int(shoulder[0]), int(shoulder[1])), (int(elbow[0]), int(elbow[1])), (0, 255, 0), 3)
+                cv2.line(frame, (int(elbow[0]), int(elbow[1])), (int(wrist[0]), int(wrist[1])), (0, 255, 0), 3)
+                cv2.line(frame, (int(hip[0]), int(hip[1])), (int(knee[0]), int(knee[1])), (255, 0, 0), 3)
+                cv2.line(frame, (int(knee[0]), int(knee[1])), (int(ankle[0]), int(ankle[1])), (255, 0, 0), 3)
 
-            # Update dashboard metrics in Column 2
-            elbow_metric.metric("Right Elbow Flexion", f"{e_angle}°")
-            shoulder_metric.metric("Right Shoulder Abduction", f"{s_angle}°")
-            knee_metric.metric("Right Lead Knee Angle", f"{k_angle}°")
+                for lm in [shoulder, elbow, wrist, hip, knee, ankle]:
+                    cv2.circle(frame, (int(lm[0]), int(lm[1])), 6, (0, 0, 255), -1)
+
+                # Update Streamlit Metrics Panel
+                elbow_metric.metric("Elbow Flexion Angle", f"{int(elbow_angle)}°")
+                knee_metric.metric("Lead Knee Extension", f"{int(knee_angle)}°")
+
+            # Render updated frame back to Streamlit
+            st_frame.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), channels="RGB", use_container_width=True)
 
     cap.release()
-    os.remove(video_path) # Clean up temp file
+    os.remove(tfile.name)
 else:
-    st.info("👈 Please upload a video file in the sidebar to start analysis.")
+    st.info("👈 Please upload a pitching video from the sidebar to begin analysis.")
