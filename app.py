@@ -92,6 +92,12 @@ if uploaded_file is not None:
             if not ret:
                 break
 
+            # --- ADD THIS FIX HERE ---
+            # Rotates mobile portrait videos if they open sideways
+            # (Change ROTATE_90_CLOCKWISE to ROTATE_90_COUNTERCLOCKWISE if it turns upside down)
+            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+            # -------------------------
+
             # Convert OpenCV frame BGR -> RGB
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
