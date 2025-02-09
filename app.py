@@ -8,7 +8,9 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
+# -----------------------------------------------------------------------------
 # Streamlit Page Setup
+# -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="AI Pitching Mechanics Analyzer",
     page_icon="⚾",
@@ -43,9 +45,9 @@ options = PoseLandmarkerOptions(
 # -----------------------------------------------------------------------------
 def calculate_angle(a, b, c):
     """Calculates the 2D angle (in degrees) between three landmark points."""
-    a = np.array(a)  # First joint (e.g., Shoulder)
-    b = np.array(b)  # Middle joint (e.g., Elbow)
-    c = np.array(c)  # End joint (e.g., Wrist)
+    a = np.array(a)  # First joint
+    b = np.array(b)  # Middle joint (vertex)
+    c = np.array(c)  # End joint
     
     radians = np.arctan2(c[1] - b[1], c[0] - b[0]) - np.arctan2(a[1] - b[1], a[0] - b[0])
     angle = np.abs(radians * 180.0 / np.pi)
@@ -74,9 +76,12 @@ if uploaded_file is not None:
 
     with col2:
         st.subheader("📊 Live Biomechanics Metrics")
+        st.caption("Benchmark ranges reflect standard elite pitching mechanics at key motion phases.")
+        
         elbow_metric = st.empty()
         shoulder_metric = st.empty()
         knee_metric = st.empty()
+        hip_metric = st.empty()
 
     cap = cv2.VideoCapture(tfile.name)
     fps = cap.get(cv2.CAP_PROP_FPS)
@@ -92,11 +97,8 @@ if uploaded_file is not None:
             if not ret:
                 break
 
-            # --- ADD THIS FIX HERE ---
-            # Rotates mobile portrait videos if they open sideways
-            # (Change ROTATE_90_CLOCKWISE to ROTATE_90_COUNTERCLOCKWISE if it turns upside down)
+            # Orientation Fix: Rotates mobile portrait video if recorded sideways
             frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-            # -------------------------
 
             # Convert OpenCV frame BGR -> RGB
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -111,7 +113,7 @@ if uploaded_file is not None:
                 landmarks = pose_landmarker_result.pose_landmarks[0]
                 h, w, _ = frame.shape
 
-                # Extract Key Landmarks (Right Side Pitcher Example)
+                # Extract Key Landmarks
                 shoulder = [landmarks[12].x * w, landmarks[12].y * h]
                 elbow = [landmarks[14].x * w, landmarks[14].y * h]
                 wrist = [landmarks[16].x * w, landmarks[16].y * h]
@@ -122,6 +124,8 @@ if uploaded_file is not None:
                 # Compute Joint Angles
                 elbow_angle = calculate_angle(shoulder, elbow, wrist)
                 knee_angle = calculate_angle(hip, knee, ankle)
+                shoulder_angle = calculate_angle(hip, shoulder, elbow)
+                hip_angle = calculate_angle(shoulder, hip, knee)
 
                 # Draw Overlay Skeletons
                 cv2.line(frame, (int(shoulder[0]), int(shoulder[1])), (int(elbow[0]), int(elbow[1])), (0, 255, 0), 3)
@@ -132,9 +136,27 @@ if uploaded_file is not None:
                 for lm in [shoulder, elbow, wrist, hip, knee, ankle]:
                     cv2.circle(frame, (int(lm[0]), int(lm[1])), 6, (0, 0, 255), -1)
 
-                # Update Streamlit Metrics Panel
-                elbow_metric.metric("Elbow Flexion Angle", f"{int(elbow_angle)}°")
-                knee_metric.metric("Lead Knee Extension", f"{int(knee_angle)}°")
+                # Update Streamlit Metrics Panel with Benchmark Hints
+                elbow_metric.metric(
+                    label="Elbow Flexion Angle", 
+                    value=f"{int(elbow_angle)}°", 
+                    help="Optimal benchmark at foot strike: 80° – 105°"
+                )
+                shoulder_metric.metric(
+                    label="Shoulder Abduction Angle", 
+                    value=f"{int(shoulder_angle)}°", 
+                    help="Optimal benchmark at foot strike: 85° – 100°"
+                )
+                knee_metric.metric(
+                    label="Lead Knee Extension", 
+                    value=f"{int(knee_angle)}°", 
+                    help="Optimal benchmark at ball release: 160° – 180°"
+                )
+                hip_metric.metric(
+                    label="Trunk Flexion Angle", 
+                    value=f"{int(hip_angle)}°", 
+                    help="Optimal benchmark near release: 30° – 50°"
+                )
 
             # Render updated frame back to Streamlit
             st_frame.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), channels="RGB", use_container_width=True)
