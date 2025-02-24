@@ -1,6 +1,7 @@
 import os
 import urllib.request
 import tempfile
+import time
 import cv2
 import numpy as np
 import streamlit as st
@@ -97,9 +98,6 @@ if uploaded_file is not None:
             if not ret:
                 break
 
-            # Orientation Fix: Rotates mobile portrait video if recorded sideways
-            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-
             # Convert OpenCV frame BGR -> RGB
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
@@ -125,7 +123,7 @@ if uploaded_file is not None:
                 elbow_angle = calculate_angle(shoulder, elbow, wrist)
                 knee_angle = calculate_angle(hip, knee, ankle)
                 shoulder_angle = calculate_angle(hip, shoulder, elbow)
-                hip_angle = calculate_angle(shoulder, hip, knee)
+                trunk_tilt = 180.0 - calculate_angle(shoulder, hip, knee)
 
                 # Draw Overlay Skeletons
                 cv2.line(frame, (int(shoulder[0]), int(shoulder[1])), (int(elbow[0]), int(elbow[1])), (0, 255, 0), 3)
@@ -153,13 +151,16 @@ if uploaded_file is not None:
                     help="Optimal benchmark at ball release: 160° – 180°"
                 )
                 hip_metric.metric(
-                    label="Trunk Flexion Angle", 
-                    value=f"{int(hip_angle)}°", 
+                    label="Trunk Forward Tilt", 
+                    value=f"{int(trunk_tilt)}°", 
                     help="Optimal benchmark near release: 30° – 50°"
                 )
 
             # Render updated frame back to Streamlit
             st_frame.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), channels="RGB", use_container_width=True)
+
+            # Frame pacing to ensure smooth sequential playback
+            time.sleep(1.0 / fps)
 
     cap.release()
     os.remove(tfile.name)
