@@ -1,7 +1,6 @@
 import os
 import urllib.request
 import tempfile
-import time
 import cv2
 import numpy as np
 import streamlit as st
@@ -85,11 +84,6 @@ if uploaded_file is not None:
         hip_metric = st.empty()
 
     cap = cv2.VideoCapture(tfile.name)
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps == 0 or np.isnan(fps):
-        fps = 30.0
-
-    frame_timestamp_ms = 0
 
     # Execute MediaPipe Pose Engine Context Manager
     with PoseLandmarker.create_from_options(options) as landmarker:
@@ -156,11 +150,8 @@ if uploaded_file is not None:
                     help="Optimal benchmark near release: 30° – 50°"
                 )
 
-            # Render updated frame back to Streamlit
+            # Render frame back to Streamlit
             st_frame.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), channels="RGB", use_container_width=True)
-
-            # Frame pacing to ensure smooth sequential playback
-            time.sleep(1.0 / fps)
 
     cap.release()
     os.remove(tfile.name)
