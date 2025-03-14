@@ -1,6 +1,7 @@
 import os
 import urllib.request
 import tempfile
+import time
 import cv2
 import numpy as np
 import streamlit as st
@@ -25,12 +26,10 @@ st.write("Upload a baseball pitching video to track skeletal landmarks and analy
 # -----------------------------------------------------------------------------
 model_path = "pose_landmarker_full.task"
 
-# Download the model dynamically if missing or corrupted on Streamlit Cloud
 if not os.path.exists(model_path) or os.path.getsize(model_path) < 1000000:
     url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task"
     urllib.request.urlretrieve(url, model_path)
 
-# Initialize MediaPipe Tasks Engine Options
 PoseLandmarker = vision.PoseLandmarker
 PoseLandmarkerOptions = vision.PoseLandmarkerOptions
 BaseOptions = python.BaseOptions
@@ -41,29 +40,21 @@ options = PoseLandmarkerOptions(
 )
 
 # -----------------------------------------------------------------------------
-# 2. Biomechanics Helper Functions
+# 2. Helper Functions
 # -----------------------------------------------------------------------------
 def calculate_angle(a, b, c):
-    """Calculates the 2D angle (in degrees) between three landmark points."""
-    a = np.array(a)  # First joint
-    b = np.array(b)  # Middle joint (vertex)
-    c = np.array(c)  # End joint
-    
+    """Calculates 2D angle between 3 points."""
+    a, b, c = np.array(a), np.array(b), np.array(c)
     radians = np.arctan2(c[1] - b[1], c[0] - b[0]) - np.arctan2(a[1] - b[1], a[0] - b[0])
     angle = np.abs(radians * 180.0 / np.pi)
-    
-    if angle > 180.0:
-        angle = 360.0 - angle
-        
-    return angle
+    return 360.0 - angle if angle > 180.0 else angle
 
 # -----------------------------------------------------------------------------
-# 3. Streamlit UI Layout & Video Upload
+# 3. Streamlit Interface
 # -----------------------------------------------------------------------------
 uploaded_file = st.sidebar.file_uploader("Upload Pitching Video", type=["mp4", "mov", "avi"])
 
 if uploaded_file is not None:
-    # Save uploaded file to a temporary file for OpenCV reading
     tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     tfile.write(uploaded_file.read())
     tfile.close()
@@ -76,7 +67,7 @@ if uploaded_file is not None:
 
     with col2:
         st.subheader("📊 Live Biomechanics Metrics")
-        st.caption("Benchmark ranges reflect standard elite pitching mechanics at key motion phases.")
+        st.caption("Benchmark ranges reflect standard elite pitching mechanics.")
         
         elbow_metric = st.empty()
         shoulder_metric = st.empty()
@@ -84,28 +75,42 @@ if uploaded_file is not None:
         hip_metric = st.empty()
 
     cap = cv2.VideoCapture(tfile.name)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps == 0 or np.isnan(fps):
+        fps = 30.0
 
-    # Execute MediaPipe Pose Engine Context Manager
+    # Read all frames into memory first
+    raw_frames = []
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        raw_frames.append(frame)
+    cap.release()
+
+    processed_frames = []
+    frame_metrics = []
+
+    progress_bar = st.progress(0, text="Analyzing pitching mechanics frames...")
+
+    # Run AI pose estimation on frames
     with PoseLandmarker.create_from_options(options) as landmarker:
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            # Convert OpenCV frame BGR -> RGB
+        total_frames = len(raw_frames)
+        for idx, frame in enumerate(raw_frames):
+            progress_bar.progress(int((idx + 1) / total_frames * 100), text=f"Analyzing frame {idx+1}/{total_frames}...")
+            
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+            timestamp_ms = int((idx / fps) * 1000)
+            
+            result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
-            # Process frame with MediaPipe
-            frame_timestamp_ms = int(cap.get(cv2.CAP_PROP_POS_MSEC))
-            pose_landmarker_result = landmarker.detect_for_video(mp_image, frame_timestamp_ms)
+            metrics = {"elbow": 0, "shoulder": 0, "knee": 0, "trunk": 0}
 
-            # Draw Landmarks & Calculate Angles
-            if pose_landmarker_result.pose_landmarks:
-                landmarks = pose_landmarker_result.pose_landmarks[0]
+            if result.pose_landmarks:
+                landmarks = result.pose_landmarks[0]
                 h, w, _ = frame.shape
 
-                # Extract Key Landmarks
                 shoulder = [landmarks[12].x * w, landmarks[12].y * h]
                 elbow = [landmarks[14].x * w, landmarks[14].y * h]
                 wrist = [landmarks[16].x * w, landmarks[16].y * h]
@@ -113,47 +118,44 @@ if uploaded_file is not None:
                 knee = [landmarks[26].x * w, landmarks[26].y * h]
                 ankle = [landmarks[28].x * w, landmarks[28].y * h]
 
-                # Compute Joint Angles
                 elbow_angle = calculate_angle(shoulder, elbow, wrist)
                 knee_angle = calculate_angle(hip, knee, ankle)
                 shoulder_angle = calculate_angle(hip, shoulder, elbow)
                 trunk_tilt = 180.0 - calculate_angle(shoulder, hip, knee)
 
-                # Draw Overlay Skeletons
-                cv2.line(frame, (int(shoulder[0]), int(shoulder[1])), (int(elbow[0]), int(elbow[1])), (0, 255, 0), 3)
-                cv2.line(frame, (int(elbow[0]), int(elbow[1])), (int(wrist[0]), int(wrist[1])), (0, 255, 0), 3)
-                cv2.line(frame, (int(hip[0]), int(hip[1])), (int(knee[0]), int(knee[1])), (255, 0, 0), 3)
-                cv2.line(frame, (int(knee[0]), int(knee[1])), (int(ankle[0]), int(ankle[1])), (255, 0, 0), 3)
+                metrics = {
+                    "elbow": int(elbow_angle),
+                    "shoulder": int(shoulder_angle),
+                    "knee": int(knee_angle),
+                    "trunk": int(trunk_tilt)
+                }
+
+                # Draw Overlay Skeletons directly onto frame
+                cv2.line(frame, (int(shoulder[0]), int(shoulder[1])), (int(elbow[0]), int(elbow[1])), (0, 255, 0), 4)
+                cv2.line(frame, (int(elbow[0]), int(elbow[1])), (int(wrist[0]), int(wrist[1])), (0, 255, 0), 4)
+                cv2.line(frame, (int(hip[0]), int(hip[1])), (int(knee[0]), int(knee[1])), (255, 0, 0), 4)
+                cv2.line(frame, (int(knee[0]), int(knee[1])), (int(ankle[0]), int(ankle[1])), (255, 0, 0), 4)
 
                 for lm in [shoulder, elbow, wrist, hip, knee, ankle]:
-                    cv2.circle(frame, (int(lm[0]), int(lm[1])), 6, (0, 0, 255), -1)
+                    cv2.circle(frame, (int(lm[0]), int(lm[1])), 7, (0, 0, 255), -1)
 
-                # Update Streamlit Metrics Panel with Benchmark Hints
-                elbow_metric.metric(
-                    label="Elbow Flexion Angle", 
-                    value=f"{int(elbow_angle)}°", 
-                    help="Optimal benchmark at foot strike: 80° – 105°"
-                )
-                shoulder_metric.metric(
-                    label="Shoulder Abduction Angle", 
-                    value=f"{int(shoulder_angle)}°", 
-                    help="Optimal benchmark at foot strike: 85° – 100°"
-                )
-                knee_metric.metric(
-                    label="Lead Knee Extension", 
-                    value=f"{int(knee_angle)}°", 
-                    help="Optimal benchmark at ball release: 160° – 180°"
-                )
-                hip_metric.metric(
-                    label="Trunk Forward Tilt", 
-                    value=f"{int(trunk_tilt)}°", 
-                    help="Optimal benchmark near release: 30° – 50°"
-                )
+            processed_frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            frame_metrics.append(metrics)
 
-            # Render frame back to Streamlit
-            st_frame.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), channels="RGB", use_container_width=True)
+    progress_bar.empty()
 
-    cap.release()
+    # Smooth Playback Loop
+    frame_delay = 1.0 / fps
+    for frame, m in zip(processed_frames, frame_metrics):
+        st_frame.image(frame, channels="RGB", use_container_width=True)
+        
+        elbow_metric.metric("Elbow Flexion Angle", f"{m['elbow']}°", help="Benchmark: 80° – 105°")
+        shoulder_metric.metric("Shoulder Abduction Angle", f"{m['shoulder']}°", help="Benchmark: 85° – 100°")
+        knee_metric.metric("Lead Knee Extension", f"{m['knee']}°", help="Benchmark: 160° – 180°")
+        hip_metric.metric("Trunk Forward Tilt", f"{m['trunk']}°", help="Benchmark: 30° – 50°")
+
+        time.sleep(frame_delay)
+
     os.remove(tfile.name)
 else:
     st.info("👈 Please upload a pitching video from the sidebar to begin analysis.")
