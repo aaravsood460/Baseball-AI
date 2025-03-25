@@ -1,7 +1,6 @@
 import os
 import urllib.request
 import tempfile
-import time
 import cv2
 import numpy as np
 import streamlit as st
@@ -19,7 +18,7 @@ st.set_page_config(
 )
 
 st.title("⚾ AI Pitching Mechanics & Biomechanics Analyzer")
-st.write("Upload a baseball pitching video to track skeletal landmarks and analyze joint angles in real-time.")
+st.write("Upload a baseball pitching video to track skeletal landmarks and analyze joint angles.")
 
 # -----------------------------------------------------------------------------
 # 1. Automatic Model Setup
@@ -50,62 +49,46 @@ def calculate_angle(a, b, c):
     return 360.0 - angle if angle > 180.0 else angle
 
 # -----------------------------------------------------------------------------
-# 3. Streamlit Interface
+# 3. Streamlit Interface & Processing
 # -----------------------------------------------------------------------------
 uploaded_file = st.sidebar.file_uploader("Upload Pitching Video", type=["mp4", "mov", "avi"])
 
 if uploaded_file is not None:
+    # Save input video
     tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     tfile.write(uploaded_file.read())
     tfile.close()
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("📺 AI Processing View")
-        st_frame = st.empty()
-
-    with col2:
-        st.subheader("📊 Live Biomechanics Metrics")
-        st.caption("Benchmark ranges reflect standard elite pitching mechanics.")
-        
-        elbow_metric = st.empty()
-        shoulder_metric = st.empty()
-        knee_metric = st.empty()
-        hip_metric = st.empty()
 
     cap = cv2.VideoCapture(tfile.name)
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps == 0 or np.isnan(fps):
         fps = 30.0
 
-    # Read all frames into memory first
-    raw_frames = []
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-        raw_frames.append(frame)
-    cap.release()
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    processed_frames = []
-    frame_metrics = []
+    # Temporary output video file
+    output_video_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
 
-    progress_bar = st.progress(0, text="Analyzing pitching mechanics frames...")
+    progress_bar = st.progress(0, text="Processing pitching mechanics...")
+    
+    max_elbow, max_knee, max_shoulder, max_trunk = 0, 0, 0, 0
+    frame_idx = 0
 
-    # Run AI pose estimation on frames
     with PoseLandmarker.create_from_options(options) as landmarker:
-        total_frames = len(raw_frames)
-        for idx, frame in enumerate(raw_frames):
-            progress_bar.progress(int((idx + 1) / total_frames * 100), text=f"Analyzing frame {idx+1}/{total_frames}...")
-            
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-            timestamp_ms = int((idx / fps) * 1000)
+            timestamp_ms = int((frame_idx / fps) * 1000)
             
             result = landmarker.detect_for_video(mp_image, timestamp_ms)
-
-            metrics = {"elbow": 0, "shoulder": 0, "knee": 0, "trunk": 0}
 
             if result.pose_landmarks:
                 landmarks = result.pose_landmarks[0]
@@ -118,19 +101,17 @@ if uploaded_file is not None:
                 knee = [landmarks[26].x * w, landmarks[26].y * h]
                 ankle = [landmarks[28].x * w, landmarks[28].y * h]
 
-                elbow_angle = calculate_angle(shoulder, elbow, wrist)
-                knee_angle = calculate_angle(hip, knee, ankle)
-                shoulder_angle = calculate_angle(hip, shoulder, elbow)
-                trunk_tilt = 180.0 - calculate_angle(shoulder, hip, knee)
+                elbow_angle = int(calculate_angle(shoulder, elbow, wrist))
+                knee_angle = int(calculate_angle(hip, knee, ankle))
+                shoulder_angle = int(calculate_angle(hip, shoulder, elbow))
+                trunk_tilt = int(180.0 - calculate_angle(shoulder, hip, knee))
 
-                metrics = {
-                    "elbow": int(elbow_angle),
-                    "shoulder": int(shoulder_angle),
-                    "knee": int(knee_angle),
-                    "trunk": int(trunk_tilt)
-                }
+                max_elbow = max(max_elbow, elbow_angle)
+                max_knee = max(max_knee, knee_angle)
+                max_shoulder = max(max_shoulder, shoulder_angle)
+                max_trunk = max(max_trunk, trunk_tilt)
 
-                # Draw Overlay Skeletons directly onto frame
+                # Draw Overlay Skeletons
                 cv2.line(frame, (int(shoulder[0]), int(shoulder[1])), (int(elbow[0]), int(elbow[1])), (0, 255, 0), 4)
                 cv2.line(frame, (int(elbow[0]), int(elbow[1])), (int(wrist[0]), int(wrist[1])), (0, 255, 0), 4)
                 cv2.line(frame, (int(hip[0]), int(hip[1])), (int(knee[0]), int(knee[1])), (255, 0, 0), 4)
@@ -139,22 +120,34 @@ if uploaded_file is not None:
                 for lm in [shoulder, elbow, wrist, hip, knee, ankle]:
                     cv2.circle(frame, (int(lm[0]), int(lm[1])), 7, (0, 0, 255), -1)
 
-            processed_frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            frame_metrics.append(metrics)
+                # Burn angle overlays directly onto top-left of video frame
+                cv2.putText(frame, f"Elbow: {elbow_angle} deg", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                cv2.putText(frame, f"Knee: {knee_angle} deg", (30, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
 
+            out.write(frame)
+            frame_idx += 1
+            if total_frames > 0:
+                progress_bar.progress(min(int((frame_idx / total_frames) * 100), 100))
+
+    cap.release()
+    out.release()
     progress_bar.empty()
 
-    # Smooth Playback Loop
-    frame_delay = 1.0 / fps
-    for frame, m in zip(processed_frames, frame_metrics):
-        st_frame.image(frame, channels="RGB", use_container_width=True)
-        
-        elbow_metric.metric("Elbow Flexion Angle", f"{m['elbow']}°", help="Benchmark: 80° – 105°")
-        shoulder_metric.metric("Shoulder Abduction Angle", f"{m['shoulder']}°", help="Benchmark: 85° – 100°")
-        knee_metric.metric("Lead Knee Extension", f"{m['knee']}°", help="Benchmark: 160° – 180°")
-        hip_metric.metric("Trunk Forward Tilt", f"{m['trunk']}°", help="Benchmark: 30° – 50°")
+    # Layout Output View
+    col1, col2 = st.columns(2)
 
-        time.sleep(frame_delay)
+    with col1:
+        st.subheader("📺 Analyzed Pitch Video")
+        st.video(output_video_path)
+
+    with col2:
+        st.subheader("📊 Peak Biomechanics Summary")
+        st.caption("Key biomechanical angles detected throughout the pitch motion.")
+        
+        st.metric("Max Elbow Flexion Angle", f"{max_elbow}°", help="Benchmark at foot strike: 80° – 105°")
+        st.metric("Max Shoulder Abduction Angle", f"{max_shoulder}°", help="Benchmark at foot strike: 85° – 100°")
+        st.metric("Max Lead Knee Extension", f"{max_knee}°", help="Benchmark at release: 160° – 180°")
+        st.metric("Max Trunk Forward Tilt", f"{max_trunk}°", help="Benchmark near release: 30° – 50°")
 
     os.remove(tfile.name)
 else:
