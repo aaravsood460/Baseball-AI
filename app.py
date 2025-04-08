@@ -70,7 +70,7 @@ if uploaded_file is not None:
 
     # Temporary output video file
     output_video_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    fourcc = cv2.VideoWriter_fourcc(*'avc1')
     out = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
 
     progress_bar = st.progress(0, text="Processing pitching mechanics...")
