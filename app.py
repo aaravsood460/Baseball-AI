@@ -69,8 +69,8 @@ if uploaded_file is not None:
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     # Temporary output video file
-    output_video_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
-    fourcc = cv2.VideoWriter_fourcc(*'avc1')
+    output_video_path = tempfile.NamedTemporaryFile(delete=False, suffix=".webm").name
+    fourcc = cv2.VideoWriter_fourcc(*'VP80')
     out = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
 
     progress_bar = st.progress(0, text="Processing pitching mechanics...")
