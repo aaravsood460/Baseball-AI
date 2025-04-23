@@ -54,7 +54,6 @@ def calculate_angle(a, b, c):
 uploaded_file = st.sidebar.file_uploader("Upload Pitching Video", type=["mp4", "mov", "avi"])
 
 if uploaded_file is not None:
-    # Save input video
     tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     tfile.write(uploaded_file.read())
     tfile.close()
@@ -64,14 +63,18 @@ if uploaded_file is not None:
     if fps == 0 or np.isnan(fps):
         fps = 30.0
 
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    # Original dimensions
+    orig_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    orig_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    # Temporary output video file
+    # Swapped dimensions for 90-degree rotated output video
+    out_width = orig_height
+    out_height = orig_width
+
     output_video_path = tempfile.NamedTemporaryFile(delete=False, suffix=".webm").name
     fourcc = cv2.VideoWriter_fourcc(*'VP80')
-    out = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
+    out = cv2.VideoWriter(output_video_path, fourcc, fps, (out_width, out_height))
 
     progress_bar = st.progress(0, text="Processing pitching mechanics...")
     
@@ -83,6 +86,9 @@ if uploaded_file is not None:
             ret, frame = cap.read()
             if not ret:
                 break
+
+            # Rotate frame 90 degrees clockwise to fix sideways orientation
+            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
 
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
@@ -120,9 +126,11 @@ if uploaded_file is not None:
                 for lm in [shoulder, elbow, wrist, hip, knee, ankle]:
                     cv2.circle(frame, (int(lm[0]), int(lm[1])), 7, (0, 0, 255), -1)
 
-                # Burn angle overlays directly onto top-left of video frame
-                cv2.putText(frame, f"Elbow: {elbow_angle} deg", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
-                cv2.putText(frame, f"Knee: {knee_angle} deg", (30, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                # Burn ALL FOUR real-time angle overlays onto the rotated video frame
+                cv2.putText(frame, f"Elbow: {elbow_angle} deg", (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+                cv2.putText(frame, f"Shoulder: {shoulder_angle} deg", (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+                cv2.putText(frame, f"Knee: {knee_angle} deg", (30, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+                cv2.putText(frame, f"Trunk Tilt: {trunk_tilt} deg", (30, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
 
             out.write(frame)
             frame_idx += 1
@@ -142,7 +150,7 @@ if uploaded_file is not None:
 
     with col2:
         st.subheader("📊 Peak Biomechanics Summary")
-        st.caption("Key biomechanical angles detected throughout the pitch motion.")
+        st.caption("Maximum joint angles detected across all frames in the pitch sequence.")
         
         st.metric("Max Elbow Flexion Angle", f"{max_elbow}°", help="Benchmark at foot strike: 80° – 105°")
         st.metric("Max Shoulder Abduction Angle", f"{max_shoulder}°", help="Benchmark at foot strike: 85° – 100°")
