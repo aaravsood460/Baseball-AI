@@ -69,9 +69,13 @@ if uploaded_file is not None:
     orig_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
+    # Swapped dimensions because 90-degree rotation flips width and height
+    out_width = orig_height
+    out_height = orig_width
+
     output_video_path = tempfile.NamedTemporaryFile(delete=False, suffix=".webm").name
     fourcc = cv2.VideoWriter_fourcc(*'VP80')
-    out = cv2.VideoWriter(output_video_path, fourcc, fps, (orig_width, orig_height))
+    out = cv2.VideoWriter(output_video_path, fourcc, fps, (out_width, out_height))
 
     progress_bar = st.progress(0, text="Processing pitching mechanics...")
     
@@ -84,7 +88,13 @@ if uploaded_file is not None:
             if not ret:
                 break
 
-            # Convert OpenCV frame BGR -> RGB
+            # 1. Rotate FIRST so the video is upright for MediaPipe analysis
+            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+
+            # 2. Get true height and width AFTER rotation
+            h, w, _ = frame.shape
+
+            # 3. Convert frame for MediaPipe
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
             timestamp_ms = int((frame_idx / fps) * 1000)
@@ -93,11 +103,8 @@ if uploaded_file is not None:
 
             if result.pose_landmarks:
                 landmarks = result.pose_landmarks[0]
-                # Get dimensions AFTER frame adjustments
-                h, w, _ = frame.shape
 
-                # Track Right Arm / Right Leg Joints (12: R Shoulder, 14: R Elbow, 16: R Wrist)
-                # (If pitcher is left-handed, use 11, 13, 15 for left side)
+                # Right side tracking (12: R Shoulder, 14: R Elbow, 16: R Wrist, 24: R Hip, 26: R Knee, 28: R Ankle)
                 shoulder = [landmarks[12].x * w, landmarks[12].y * h]
                 elbow = [landmarks[14].x * w, landmarks[14].y * h]
                 wrist = [landmarks[16].x * w, landmarks[16].y * h]
@@ -110,13 +117,13 @@ if uploaded_file is not None:
                 shoulder_angle = int(calculate_angle(hip, shoulder, elbow))
                 trunk_tilt = int(180.0 - calculate_angle(shoulder, hip, knee))
 
-                # Store for valid aggregate analysis
+                # Store for aggregate calculations
                 elbow_angles.append(elbow_angle)
                 shoulder_angles.append(shoulder_angle)
                 knee_angles.append(knee_angle)
                 trunk_tilts.append(trunk_tilt)
 
-                # Draw Overlay Skeletons accurately on body landmarks
+                # Draw skeleton lines
                 cv2.line(frame, (int(shoulder[0]), int(shoulder[1])), (int(elbow[0]), int(elbow[1])), (0, 255, 0), 3)
                 cv2.line(frame, (int(elbow[0]), int(elbow[1])), (int(wrist[0]), int(wrist[1])), (0, 255, 0), 3)
                 cv2.line(frame, (int(hip[0]), int(hip[1])), (int(knee[0]), int(knee[1])), (255, 0, 0), 3)
@@ -125,11 +132,11 @@ if uploaded_file is not None:
                 for lm in [shoulder, elbow, wrist, hip, knee, ankle]:
                     cv2.circle(frame, (int(lm[0]), int(lm[1])), 6, (0, 0, 255), -1)
 
-                # Real-time Angle Overlays
-                cv2.putText(frame, f"Elbow: {elbow_angle} deg", (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-                cv2.putText(frame, f"Shoulder: {shoulder_angle} deg", (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-                cv2.putText(frame, f"Knee: {knee_angle} deg", (30, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-                cv2.putText(frame, f"Trunk Tilt: {trunk_tilt} deg", (30, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                # Real-time frame overlays (explicitly labeled as "Live")
+                cv2.putText(frame, f"Live Elbow: {elbow_angle} deg", (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                cv2.putText(frame, f"Live Shoulder: {shoulder_angle} deg", (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                cv2.putText(frame, f"Live Knee: {knee_angle} deg", (30, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                cv2.putText(frame, f"Live Trunk Tilt: {trunk_tilt} deg", (30, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
             out.write(frame)
             frame_idx += 1
@@ -140,7 +147,7 @@ if uploaded_file is not None:
     out.release()
     progress_bar.empty()
 
-    # Calculate filtered peak metrics (95th percentile to eliminate outlier tracking errors)
+    # Filtered peak metrics (90th percentile to eliminate outlier tracking glitches)
     peak_elbow = int(np.percentile(elbow_angles, 90)) if elbow_angles else 0
     peak_shoulder = int(np.percentile(shoulder_angles, 90)) if shoulder_angles else 0
     peak_knee = int(np.percentile(knee_angles, 90)) if knee_angles else 0
@@ -155,7 +162,7 @@ if uploaded_file is not None:
 
     with col2:
         st.subheader("📊 Peak Biomechanics Summary")
-        st.caption("Realistic peak mechanical values across pitch execution (filtered for accuracy).")
+        st.caption("Maximum mechanical values achieved across the pitch sequence.")
         
         st.metric("Max Elbow Flexion Angle", f"{peak_elbow}°", help="Benchmark at foot strike: 80° – 105°")
         st.metric("Max Shoulder Abduction Angle", f"{peak_shoulder}°", help="Benchmark at foot strike: 85° – 100°")
