@@ -18,7 +18,7 @@ st.set_page_config(
 )
 
 st.title("⚾ AI Pitching Mechanics & Biomechanics Analyzer")
-st.write("Upload a baseball pitching video to track skeletal landmarks and analyze peak joint angles.")
+st.write("Upload one or multiple pitching videos to calculate individual pitch peaks and establish the pitcher's personal biomechanical range.")
 
 # -----------------------------------------------------------------------------
 # 1. Automatic Model Setup
@@ -50,14 +50,10 @@ def calculate_angle(a, b, c):
         angle = 360.0 - angle
     return angle
 
-# -----------------------------------------------------------------------------
-# 3. Streamlit Interface & Processing
-# -----------------------------------------------------------------------------
-uploaded_file = st.sidebar.file_uploader("Upload Pitching Video", type=["mp4", "mov", "avi"])
-
-if uploaded_file is not None:
+def process_single_video(file_bytes, file_name):
+    """Processes a single video clip and returns path to output video and peak angles dict."""
     tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    tfile.write(uploaded_file.read())
+    tfile.write(file_bytes)
     tfile.close()
 
     cap = cv2.VideoCapture(tfile.name)
@@ -69,7 +65,6 @@ if uploaded_file is not None:
     orig_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    # Swapped dimensions for 90-degree rotated output video
     out_width = orig_height
     out_height = orig_width
 
@@ -77,8 +72,6 @@ if uploaded_file is not None:
     fourcc = cv2.VideoWriter_fourcc(*'VP80')
     out = cv2.VideoWriter(output_video_path, fourcc, fps, (out_width, out_height))
 
-    progress_bar = st.progress(0, text="Processing pitching mechanics...")
-    
     elbow_angles, shoulder_angles, knee_angles, trunk_tilts = [], [], [], []
     frame_idx = 0
 
@@ -88,13 +81,9 @@ if uploaded_file is not None:
             if not ret:
                 break
 
-            # 1. Rotate FIRST so video is upright for tracking
             frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-
-            # 2. Get true height and width after rotation
             h, w, _ = frame.shape
 
-            # 3. Convert frame for MediaPipe
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
             timestamp_ms = int((frame_idx / fps) * 1000)
@@ -104,7 +93,6 @@ if uploaded_file is not None:
             if result.pose_landmarks:
                 landmarks = result.pose_landmarks[0]
 
-                # Key joints (12: R Shoulder, 14: R Elbow, 16: R Wrist, 24: R Hip, 26: R Knee, 28: R Ankle)
                 shoulder = [landmarks[12].x * w, landmarks[12].y * h]
                 elbow = [landmarks[14].x * w, landmarks[14].y * h]
                 wrist = [landmarks[16].x * w, landmarks[16].y * h]
@@ -117,13 +105,11 @@ if uploaded_file is not None:
                 shoulder_angle = int(calculate_angle(hip, shoulder, elbow))
                 trunk_tilt = int(180.0 - calculate_angle(shoulder, hip, knee))
 
-                # Store for aggregate calculations
                 elbow_angles.append(elbow_angle)
                 shoulder_angles.append(shoulder_angle)
                 knee_angles.append(knee_angle)
                 trunk_tilts.append(trunk_tilt)
 
-                # Draw clean skeletal lines & joint dots on video
                 cv2.line(frame, (int(shoulder[0]), int(shoulder[1])), (int(elbow[0]), int(elbow[1])), (0, 255, 0), 3)
                 cv2.line(frame, (int(elbow[0]), int(elbow[1])), (int(wrist[0]), int(wrist[1])), (0, 255, 0), 3)
                 cv2.line(frame, (int(hip[0]), int(hip[1])), (int(knee[0]), int(knee[1])), (255, 0, 0), 3)
@@ -134,35 +120,99 @@ if uploaded_file is not None:
 
             out.write(frame)
             frame_idx += 1
-            if total_frames > 0:
-                progress_bar.progress(min(int((frame_idx / total_frames) * 100), 100))
 
     cap.release()
     out.release()
+    os.remove(tfile.name)
+
+    peaks = {
+        "elbow": int(np.percentile(elbow_angles, 90)) if elbow_angles else 0,
+        "shoulder": int(np.percentile(shoulder_angles, 90)) if shoulder_angles else 0,
+        "knee": int(np.percentile(knee_angles, 90)) if knee_angles else 0,
+        "trunk": int(np.percentile(trunk_tilts, 90)) if trunk_tilts else 0,
+    }
+
+    return output_video_path, peaks
+
+# -----------------------------------------------------------------------------
+# 3. Streamlit Interface & Multi-Video Logic
+# -----------------------------------------------------------------------------
+uploaded_files = st.sidebar.file_uploader(
+    "Upload Pitching Videos (1 or Multiple)", 
+    type=["mp4", "mov", "avi"], 
+    accept_multiple_files=True
+)
+
+if uploaded_files:
+    session_peaks = {"elbow": [], "shoulder": [], "knee": [], "trunk": []}
+    processed_videos = []
+
+    progress_bar = st.progress(0, text="Processing video session...")
+    
+    for idx, uploaded_file in enumerate(uploaded_files):
+        out_path, peaks = process_single_video(uploaded_file.read(), uploaded_file.name)
+        processed_videos.append((uploaded_file.name, out_path, peaks))
+        
+        session_peaks["elbow"].append(peaks["elbow"])
+        session_peaks["shoulder"].append(peaks["shoulder"])
+        session_peaks["knee"].append(peaks["knee"])
+        session_peaks["trunk"].append(peaks["trunk"])
+
+        progress_bar.progress(int(((idx + 1) / len(uploaded_files)) * 100))
+
     progress_bar.empty()
 
-    # Calculate 90th percentile peaks (removes momentary tracking glitches/spikes)
-    peak_elbow = int(np.percentile(elbow_angles, 90)) if elbow_angles else 0
-    peak_shoulder = int(np.percentile(shoulder_angles, 90)) if shoulder_angles else 0
-    peak_knee = int(np.percentile(knee_angles, 90)) if knee_angles else 0
-    peak_trunk = int(np.percentile(trunk_tilts, 90)) if trunk_tilts else 0
+    # Layout Output
+    col_video, col_summary = st.columns([1, 1])
 
-    # Layout Output View
-    col1, col2 = st.columns(2)
+    with col_video:
+        st.subheader("📺 Processed Video Clips")
+        selected_vid_name = st.selectbox(
+            "Select clip to inspect:", 
+            options=[vid[0] for vid in processed_videos]
+        )
+        # Find matching video path
+        selected_vid = next(item for item in processed_videos if item[0] == selected_vid_name)
+        st.video(selected_vid[1])
 
-    with col1:
-        st.subheader("📺 Analyzed Pitch Video")
-        st.video(output_video_path)
+    with col_summary:
+        st.subheader("📊 Pitcher Baseline & Range Profile")
+        st.caption(f"Calculated across {len(uploaded_files)} uploaded video sample(s).")
 
-    with col2:
-        st.subheader("📊 Peak Biomechanics Summary")
-        st.caption("Maximum mechanical joint angles achieved across the pitch sequence.")
-        
-        st.metric("Max Elbow Extension Angle", f"{peak_elbow}°", help="Benchmark at release: 160° – 180°")
-        st.metric("Max Shoulder Abduction Angle", f"{peak_shoulder}°", help="Benchmark at foot strike: 85° – 100°")
-        st.metric("Max Lead Knee Extension", f"{peak_knee}°", help="Benchmark at release: 160° – 180°")
-        st.metric("Max Trunk Forward Tilt", f"{peak_trunk}°", help="Benchmark near release: 30° – 50°")
+        # Summary Table View
+        def format_range_col(data_list):
+            if not data_list:
+                return "N/A"
+            min_val, max_val = min(data_list), max(data_list)
+            avg_val = int(np.mean(data_list))
+            if len(data_list) == 1:
+                return f"{avg_val}°"
+            return f"**{min_val}° – {max_val}°** *(Avg: {avg_val}°)*"
 
-    os.remove(tfile.name)
+        summary_data = [
+            {
+                "Joint Metric": "Max Elbow Extension",
+                "Pitcher Range (Session)": format_range_col(session_peaks["elbow"]),
+                "Benchmark Range": "160° – 180°"
+            },
+            {
+                "Joint Metric": "Max Shoulder Abduction",
+                "Pitcher Range (Session)": format_range_col(session_peaks["shoulder"]),
+                "Benchmark Range": "85° – 100°"
+            },
+            {
+                "Joint Metric": "Max Lead Knee Extension",
+                "Pitcher Range (Session)": format_range_col(session_peaks["knee"]),
+                "Benchmark Range": "160° – 180°"
+            },
+            {
+                "Joint Metric": "Max Trunk Forward Tilt",
+                "Pitcher Range (Session)": format_range_col(session_peaks["trunk"]),
+                "Benchmark Range": "30° – 50°"
+            },
+        ]
+
+        st.table(summary_data)
+
 else:
-    st.info("👈 Please upload a pitching video from the sidebar to begin analysis.")
+    st.info("👈 Please upload 1 or more pitching videos from the sidebar to establish a biomechanical range profile.")
