@@ -18,25 +18,23 @@ st.set_page_config(
 )
 
 st.title("⚾ AI Pitching Mechanics & Biomechanics Analyzer")
-st.write("Upload one or multiple pitching videos to calculate individual pitch peaks and establish the pitcher's personal biomechanical range.")
+st.write("Upload one or multiple pitching videos to calculate joint angles and establish a personal biomechanical range.")
 
 # -----------------------------------------------------------------------------
-# 1. Automatic Model Setup
+# 1. Safe Model Setup (Cached)
 # -----------------------------------------------------------------------------
-model_path = "pose_landmarker_full.task"
+@st.cache_resource
+def load_pose_landmarker_options():
+    model_path = "pose_landmarker_full.task"
+    if not os.path.exists(model_path) or os.path.getsize(model_path) < 1000000:
+        url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task"
+        urllib.request.urlretrieve(url, model_path)
 
-if not os.path.exists(model_path) or os.path.getsize(model_path) < 1000000:
-    url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task"
-    urllib.request.urlretrieve(url, model_path)
-
-PoseLandmarker = vision.PoseLandmarker
-PoseLandmarkerOptions = vision.PoseLandmarkerOptions
-BaseOptions = python.BaseOptions
-
-options = PoseLandmarkerOptions(
-    base_options=BaseOptions(model_asset_path=model_path),
-    running_mode=vision.RunningMode.VIDEO
-)
+    base_options = python.BaseOptions(model_asset_path=model_path)
+    return vision.PoseLandmarkerOptions(
+        base_options=base_options,
+        running_mode=vision.RunningMode.VIDEO
+    )
 
 # -----------------------------------------------------------------------------
 # 2. Helper Functions
@@ -50,8 +48,10 @@ def calculate_angle(a, b, c):
         angle = 360.0 - angle
     return angle
 
-def process_single_video(file_bytes, file_name):
+def process_single_video(file_bytes):
     """Processes a single video clip and returns path to output video and peak angles dict."""
+    options = load_pose_landmarker_options()
+    
     tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     tfile.write(file_bytes)
     tfile.close()
@@ -63,24 +63,24 @@ def process_single_video(file_bytes, file_name):
 
     orig_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     orig_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    
+    out_width = orig_height if orig_height > 0 else 720
+    out_height = orig_width if orig_width > 0 else 1280
 
-    out_width = orig_height
-    out_height = orig_width
-
-    output_video_path = tempfile.NamedTemporaryFile(delete=False, suffix=".webm").name
-    fourcc = cv2.VideoWriter_fourcc(*'VP80')
+    output_video_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(output_video_path, fourcc, fps, (out_width, out_height))
 
     elbow_angles, shoulder_angles, knee_angles, trunk_tilts = [], [], [], []
     frame_idx = 0
 
-    with PoseLandmarker.create_from_options(options) as landmarker:
+    with vision.PoseLandmarker.create_from_options(options) as landmarker:
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
 
+            # Rotate frame upright first
             frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
             h, w, _ = frame.shape
 
@@ -90,7 +90,7 @@ def process_single_video(file_bytes, file_name):
             
             result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
-            if result.pose_landmarks:
+            if result.pose_landmarks and len(result.pose_landmarks) > 0:
                 landmarks = result.pose_landmarks[0]
 
                 shoulder = [landmarks[12].x * w, landmarks[12].y * h]
@@ -126,10 +126,10 @@ def process_single_video(file_bytes, file_name):
     os.remove(tfile.name)
 
     peaks = {
-        "elbow": int(np.percentile(elbow_angles, 90)) if elbow_angles else 0,
-        "shoulder": int(np.percentile(shoulder_angles, 90)) if shoulder_angles else 0,
-        "knee": int(np.percentile(knee_angles, 90)) if knee_angles else 0,
-        "trunk": int(np.percentile(trunk_tilts, 90)) if trunk_tilts else 0,
+        "elbow": int(np.percentile(elbow_angles, 90)) if len(elbow_angles) > 0 else 0,
+        "shoulder": int(np.percentile(shoulder_angles, 90)) if len(shoulder_angles) > 0 else 0,
+        "knee": int(np.percentile(knee_angles, 90)) if len(knee_angles) > 0 else 0,
+        "trunk": int(np.percentile(trunk_tilts, 90)) if len(trunk_tilts) > 0 else 0,
     }
 
     return output_video_path, peaks
@@ -150,7 +150,7 @@ if uploaded_files:
     progress_bar = st.progress(0, text="Processing video session...")
     
     for idx, uploaded_file in enumerate(uploaded_files):
-        out_path, peaks = process_single_video(uploaded_file.read(), uploaded_file.name)
+        out_path, peaks = process_single_video(uploaded_file.read())
         processed_videos.append((uploaded_file.name, out_path, peaks))
         
         session_peaks["elbow"].append(peaks["elbow"])
@@ -171,7 +171,6 @@ if uploaded_files:
             "Select clip to inspect:", 
             options=[vid[0] for vid in processed_videos]
         )
-        # Find matching video path
         selected_vid = next(item for item in processed_videos if item[0] == selected_vid_name)
         st.video(selected_vid[1])
 
@@ -179,7 +178,6 @@ if uploaded_files:
         st.subheader("📊 Pitcher Baseline & Range Profile")
         st.caption(f"Calculated across {len(uploaded_files)} uploaded video sample(s).")
 
-        # Summary Table View
         def format_range_col(data_list):
             if not data_list:
                 return "N/A"
@@ -187,7 +185,7 @@ if uploaded_files:
             avg_val = int(np.mean(data_list))
             if len(data_list) == 1:
                 return f"{avg_val}°"
-            return f"**{min_val}° – {max_val}°** *(Avg: {avg_val}°)*"
+            return f"{min_val}° – {max_val}° (Avg: {avg_val}°)"
 
         summary_data = [
             {
