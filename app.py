@@ -21,24 +21,16 @@ st.title("⚾ AI Pitching Mechanics & Biomechanics Analyzer")
 st.write("Upload one or multiple pitching videos to calculate joint angles and establish a personal biomechanical range.")
 
 # -----------------------------------------------------------------------------
-# 1. Safe Model Setup (Cached)
+# 1. Model Download & Cache
 # -----------------------------------------------------------------------------
 @st.cache_resource
-def load_pose_landmarker_options():
-    model_path = "pose_landmarker_full.task"
+def get_model_path():
+    model_path = os.path.join(tempfile.gettempdir(), "pose_landmarker_full.task")
     if not os.path.exists(model_path) or os.path.getsize(model_path) < 1000000:
         url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task"
         urllib.request.urlretrieve(url, model_path)
+    return model_path
 
-    base_options = python.BaseOptions(model_asset_path=model_path)
-    return vision.PoseLandmarkerOptions(
-        base_options=base_options,
-        running_mode=vision.RunningMode.VIDEO
-    )
-
-# -----------------------------------------------------------------------------
-# 2. Helper Functions
-# -----------------------------------------------------------------------------
 def calculate_angle(a, b, c):
     """Calculates 2D interior angle (0-180 deg) between 3 joint points."""
     a, b, c = np.array(a), np.array(b), np.array(c)
@@ -49,14 +41,21 @@ def calculate_angle(a, b, c):
     return angle
 
 def process_single_video(file_bytes):
-    """Processes a single video clip and returns path to output video and peak angles dict."""
-    options = load_pose_landmarker_options()
+    """Processes a single video clip safely on Linux cloud containers."""
+    model_path = get_model_path()
     
-    tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    tfile.write(file_bytes)
-    tfile.close()
+    base_options = python.BaseOptions(model_asset_path=model_path)
+    options = vision.PoseLandmarkerOptions(
+        base_options=base_options,
+        running_mode=vision.RunningMode.VIDEO
+    )
 
-    cap = cv2.VideoCapture(tfile.name)
+    # Save uploaded input video
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tfile:
+        tfile.write(file_bytes)
+        in_path = tfile.name
+
+    cap = cv2.VideoCapture(in_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps == 0 or np.isnan(fps):
         fps = 30.0
@@ -64,12 +63,20 @@ def process_single_video(file_bytes):
     orig_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     orig_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     
+    # Post-rotation dimensions
     out_width = orig_height if orig_height > 0 else 720
     out_height = orig_width if orig_width > 0 else 1280
 
-    output_video_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_video_path, fourcc, fps, (out_width, out_height))
+    out_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    out_path = out_file.name
+    out_file.close()
+
+    # Use 'avc1' or 'mp4v' for cross-platform Streamlit rendering
+    fourcc = cv2.VideoWriter_fourcc(*'avc1')
+    out = cv2.VideoWriter(out_path, fourcc, fps, (out_width, out_height))
+    if not out.isOpened():
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(out_path, fourcc, fps, (out_width, out_height))
 
     elbow_angles, shoulder_angles, knee_angles, trunk_tilts = [], [], [], []
     frame_idx = 0
@@ -123,7 +130,8 @@ def process_single_video(file_bytes):
 
     cap.release()
     out.release()
-    os.remove(tfile.name)
+    if os.path.exists(in_path):
+        os.remove(in_path)
 
     peaks = {
         "elbow": int(np.percentile(elbow_angles, 90)) if len(elbow_angles) > 0 else 0,
@@ -132,10 +140,10 @@ def process_single_video(file_bytes):
         "trunk": int(np.percentile(trunk_tilts, 90)) if len(trunk_tilts) > 0 else 0,
     }
 
-    return output_video_path, peaks
+    return out_path, peaks
 
 # -----------------------------------------------------------------------------
-# 3. Streamlit Interface & Multi-Video Logic
+# 2. Streamlit UI Logic
 # -----------------------------------------------------------------------------
 uploaded_files = st.sidebar.file_uploader(
     "Upload Pitching Videos (1 or Multiple)", 
@@ -150,67 +158,70 @@ if uploaded_files:
     progress_bar = st.progress(0, text="Processing video session...")
     
     for idx, uploaded_file in enumerate(uploaded_files):
-        out_path, peaks = process_single_video(uploaded_file.read())
-        processed_videos.append((uploaded_file.name, out_path, peaks))
-        
-        session_peaks["elbow"].append(peaks["elbow"])
-        session_peaks["shoulder"].append(peaks["shoulder"])
-        session_peaks["knee"].append(peaks["knee"])
-        session_peaks["trunk"].append(peaks["trunk"])
+        try:
+            out_path, peaks = process_single_video(uploaded_file.read())
+            processed_videos.append((uploaded_file.name, out_path, peaks))
+            
+            session_peaks["elbow"].append(peaks["elbow"])
+            session_peaks["shoulder"].append(peaks["shoulder"])
+            session_peaks["knee"].append(peaks["knee"])
+            session_peaks["trunk"].append(peaks["trunk"])
+        except Exception as e:
+            st.error(f"Error processing {uploaded_file.name}: {e}")
 
         progress_bar.progress(int(((idx + 1) / len(uploaded_files)) * 100))
 
     progress_bar.empty()
 
-    # Layout Output
-    col_video, col_summary = st.columns([1, 1])
+    if processed_videos:
+        col_video, col_summary = st.columns([1, 1])
 
-    with col_video:
-        st.subheader("📺 Processed Video Clips")
-        selected_vid_name = st.selectbox(
-            "Select clip to inspect:", 
-            options=[vid[0] for vid in processed_videos]
-        )
-        selected_vid = next(item for item in processed_videos if item[0] == selected_vid_name)
-        st.video(selected_vid[1])
+        with col_video:
+            st.subheader("📺 Processed Video Clips")
+            selected_vid_name = st.selectbox(
+                "Select clip to inspect:", 
+                options=[vid[0] for vid in processed_videos]
+            )
+            selected_vid = next(item for item in processed_videos if item[0] == selected_vid_name)
+            st.video(selected_vid[1])
 
-    with col_summary:
-        st.subheader("📊 Pitcher Baseline & Range Profile")
-        st.caption(f"Calculated across {len(uploaded_files)} uploaded video sample(s).")
+        with col_summary:
+            st.subheader("📊 Pitcher Baseline & Range Profile")
+            st.caption(f"Calculated across {len(processed_videos)} uploaded video sample(s).")
 
-        def format_range_col(data_list):
-            if not data_list:
-                return "N/A"
-            min_val, max_val = min(data_list), max(data_list)
-            avg_val = int(np.mean(data_list))
-            if len(data_list) == 1:
-                return f"{avg_val}°"
-            return f"{min_val}° – {max_val}° (Avg: {avg_val}°)"
+            def format_range_col(data_list):
+                if not data_list:
+                    return "N/A"
+                min_val, max_val = min(data_list), max(data_list)
+                avg_val = int(np.mean(data_list))
+                if len(data_list) == 1:
+                    return f"{avg_val}°"
+                return f"{min_val}° – {max_val}° (Avg: {avg_val}°)"
 
-        summary_data = [
-            {
-                "Joint Metric": "Max Elbow Extension",
-                "Pitcher Range (Session)": format_range_col(session_peaks["elbow"]),
-                "Benchmark Range": "160° – 180°"
-            },
-            {
-                "Joint Metric": "Max Shoulder Abduction",
-                "Pitcher Range (Session)": format_range_col(session_peaks["shoulder"]),
-                "Benchmark Range": "85° – 100°"
-            },
-            {
-                "Joint Metric": "Max Lead Knee Extension",
-                "Pitcher Range (Session)": format_range_col(session_peaks["knee"]),
-                "Benchmark Range": "160° – 180°"
-            },
-            {
-                "Joint Metric": "Max Trunk Forward Tilt",
-                "Pitcher Range (Session)": format_range_col(session_peaks["trunk"]),
-                "Benchmark Range": "30° – 50°"
-            },
-        ]
+            summary_data = [
+                {
+                    "Joint Metric": "Max Elbow Extension",
+                    "Pitcher Range (Session)": format_range_col(session_peaks["elbow"]),
+                    "Benchmark Range": "160° – 180°"
+                },
+                {
+                    "Joint Metric": "Max Shoulder Abduction",
+                    "Pitcher Range (Session)": format_range_col(session_peaks["shoulder"]),
+                    "Benchmark Range": "85° – 100°"
+                },
+                {
+                    "Joint Metric": "Max Lead Knee Extension",
+                    "Pitcher Range (Session)": format_range_col(session_peaks["knee"]),
+                    "Benchmark Range": "160° – 180°"
+                },
+                {
+                    "Joint Metric": "Max Trunk Forward Tilt",
+                    "Pitcher Range (Session)": format_range_col(session_peaks["trunk"]),
+                    "Benchmark Range": "30° – 50°"
+                },
+            ]
 
-        st.table(summary_data)
+            st.table(summary_data)
 
 else:
     st.info("👈 Please upload 1 or more pitching videos from the sidebar to establish a biomechanical range profile.")
