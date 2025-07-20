@@ -41,7 +41,7 @@ def calculate_angle(a, b, c):
     return angle
 
 def process_single_video(file_bytes):
-    """Processes a single video clip safely on Linux cloud containers."""
+    """Processes a single video clip safely and outputs web-playable WebM video."""
     model_path = get_model_path()
     
     base_options = python.BaseOptions(model_asset_path=model_path)
@@ -67,16 +67,13 @@ def process_single_video(file_bytes):
     out_width = orig_height if orig_height > 0 else 720
     out_height = orig_width if orig_width > 0 else 1280
 
-    out_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    out_file = tempfile.NamedTemporaryFile(delete=False, suffix=".webm")
     out_path = out_file.name
     out_file.close()
 
-    # Use 'avc1' or 'mp4v' for cross-platform Streamlit rendering
-    fourcc = cv2.VideoWriter_fourcc(*'avc1')
+    # VP80 inside WebM container guarantees standard browser playback
+    fourcc = cv2.VideoWriter_fourcc(*'VP80')
     out = cv2.VideoWriter(out_path, fourcc, fps, (out_width, out_height))
-    if not out.isOpened():
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(out_path, fourcc, fps, (out_width, out_height))
 
     elbow_angles, shoulder_angles, knee_angles, trunk_tilts = [], [], [], []
     frame_idx = 0
@@ -183,7 +180,9 @@ if uploaded_files:
                 options=[vid[0] for vid in processed_videos]
             )
             selected_vid = next(item for item in processed_videos if item[0] == selected_vid_name)
-            st.video(selected_vid[1])
+            
+            # Explicit format tag for Streamlit HTML5 player
+            st.video(selected_vid[1], format="video/webm")
 
         with col_summary:
             st.subheader("📊 Pitcher Baseline & Range Profile")
