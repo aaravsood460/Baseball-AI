@@ -41,7 +41,7 @@ def calculate_angle(a, b, c):
     return angle
 
 def process_single_video(file_bytes):
-    """Processes a single video clip safely and outputs web-playable WebM video."""
+    """Processes a single video clip safely without unneeded frame rotations."""
     model_path = get_model_path()
     
     base_options = python.BaseOptions(model_asset_path=model_path)
@@ -60,18 +60,18 @@ def process_single_video(file_bytes):
     if fps == 0 or np.isnan(fps):
         fps = 30.0
 
-    orig_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    orig_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    # Natural video dimensions (No swapping)
+    out_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    out_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     
-    # Post-rotation dimensions
-    out_width = orig_height if orig_height > 0 else 720
-    out_height = orig_width if orig_width > 0 else 1280
+    if out_width == 0 or out_height == 0:
+        out_width, out_height = 720, 1280
 
     out_file = tempfile.NamedTemporaryFile(delete=False, suffix=".webm")
     out_path = out_file.name
     out_file.close()
 
-    # VP80 inside WebM container guarantees standard browser playback
+    # VP80 inside WebM container for cross-browser support
     fourcc = cv2.VideoWriter_fourcc(*'VP80')
     out = cv2.VideoWriter(out_path, fourcc, fps, (out_width, out_height))
 
@@ -84,8 +84,7 @@ def process_single_video(file_bytes):
             if not ret:
                 break
 
-            # Rotate frame upright first
-            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+            # Frame is already upright; no cv2.rotate call needed!
             h, w, _ = frame.shape
 
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -181,7 +180,6 @@ if uploaded_files:
             )
             selected_vid = next(item for item in processed_videos if item[0] == selected_vid_name)
             
-            # Explicit format tag for Streamlit HTML5 player
             st.video(selected_vid[1], format="video/webm")
 
         with col_summary:
