@@ -18,7 +18,7 @@ st.set_page_config(
 )
 
 st.title("⚾ AI Pitching Mechanics & Biomechanics Analyzer")
-st.write("Extract critical joint angles at **Foot Contact**, **Max Layback**, and **Ball Release**, with automated coaching feedback.")
+st.write("Extract critical joint angles at **Foot Contact**, **Max Layback**, and **Ball Release**, with session tracking and coaching diagnostics.")
 
 # -----------------------------------------------------------------------------
 # 1. Model Download & Cache
@@ -99,7 +99,6 @@ def process_single_video(file_bytes):
                 knee = [landmarks[26].x * w, landmarks[26].y * h]
                 ankle = [landmarks[28].x * w, landmarks[28].y * h]
 
-                # Angles
                 elbow_angle = int(calculate_angle(shoulder, elbow, wrist))
                 knee_angle = int(calculate_angle(hip, knee, ankle))
                 shoulder_angle = int(calculate_angle(hip, shoulder, elbow))
@@ -115,7 +114,7 @@ def process_single_video(file_bytes):
                     "ankle_y": ankle[1]
                 })
 
-                # Annotate skeleton
+                # Visual annotations
                 cv2.line(frame, (int(shoulder[0]), int(shoulder[1])), (int(elbow[0]), int(elbow[1])), (0, 255, 0), 3)
                 cv2.line(frame, (int(elbow[0]), int(elbow[1])), (int(wrist[0]), int(wrist[1])), (0, 255, 0), 3)
                 cv2.line(frame, (int(hip[0]), int(hip[1])), (int(knee[0]), int(knee[1])), (255, 0, 0), 3)
@@ -134,21 +133,18 @@ def process_single_video(file_bytes):
         os.remove(in_path)
 
     # -------------------------------------------------------------------------
-    # Key Phase Identification Logic
+    # Key Phase Identification
     # -------------------------------------------------------------------------
     valid_frames = [f for f in frames_data if f["has_pose"]]
     
     if len(valid_frames) > 5:
-        # Release point: Frame of peak forward wrist velocity
         wrist_velocities = [valid_frames[i]["wrist_x"] - valid_frames[i-1]["wrist_x"] for i in range(1, len(valid_frames))]
         release_idx = np.argmax(wrist_velocities) + 1
         release_frame = valid_frames[release_idx]
 
-        # Max Layback: Occurs shortly before release point
         pre_release_frames = valid_frames[max(0, release_idx - 15):release_idx]
         layback_frame = max(pre_release_frames, key=lambda x: x["shoulder"]) if pre_release_frames else release_frame
 
-        # Foot Contact: Occurs prior to layback
         early_frames = valid_frames[:max(1, release_idx - 10)]
         foot_contact_frame = max(early_frames, key=lambda x: x["ankle_y"]) if early_frames else release_frame
     else:
@@ -173,11 +169,16 @@ def process_single_video(file_bytes):
 
     return out_path, phase_metrics
 
-def generate_coaching_insights(p_data):
-    """Generates automated coaching recommendations based on key phase angles."""
-    alerts = []
+def format_session_range(val_list):
+    if not val_list:
+        return "N/A"
+    if len(val_list) == 1:
+        return f"{val_list[0]}°"
+    min_v, max_v, avg_v = min(val_list), max(val_list), int(np.mean(val_list))
+    return f"{min_v}° – {max_v}° (Avg: {avg_v}°)"
 
-    # 1. Lead Leg Block Check at Release
+def generate_coaching_insights(p_data):
+    alerts = []
     lead_knee_rel = p_data["release"]["knee"]
     if lead_knee_rel < 160:
         alerts.append({
@@ -194,7 +195,6 @@ def generate_coaching_insights(p_data):
             "cue": ""
         })
 
-    # 2. Shoulder Abduction / Arm Slot Check at Layback
     shoulder_layback = p_data["max_layback"]["shoulder"]
     if shoulder_layback < 85:
         alerts.append({
@@ -204,7 +204,6 @@ def generate_coaching_insights(p_data):
             "cue": "👉 **Coaching Cue:** Keep the elbow level with the shoulder line through arm cocking."
         })
 
-    # 3. Forward Trunk Tilt Check at Release
     trunk_rel = p_data["release"]["trunk"]
     if trunk_rel < 30:
         alerts.append({
@@ -228,7 +227,7 @@ uploaded_files = st.sidebar.file_uploader(
 if uploaded_files:
     processed_videos = []
 
-    progress_bar = st.progress(0, text="Processing pitching phases & generating analysis...")
+    progress_bar = st.progress(0, text="Processing pitching phases & aggregating metrics...")
     
     for idx, uploaded_file in enumerate(uploaded_files):
         try:
@@ -242,6 +241,16 @@ if uploaded_files:
     progress_bar.empty()
 
     if processed_videos:
+        # Collect session lists
+        session_data = {
+            "fc_knee": [v[2]["foot_contact"]["knee"] for v in processed_videos],
+            "fc_trunk": [v[2]["foot_contact"]["trunk"] for v in processed_videos],
+            "lb_shoulder": [v[2]["max_layback"]["shoulder"] for v in processed_videos],
+            "lb_elbow": [v[2]["max_layback"]["elbow"] for v in processed_videos],
+            "rel_knee": [v[2]["release"]["knee"] for v in processed_videos],
+            "rel_trunk": [v[2]["release"]["trunk"] for v in processed_videos],
+        }
+
         col_video, col_summary = st.columns([1, 1])
 
         with col_video:
@@ -255,45 +264,51 @@ if uploaded_files:
 
         with col_summary:
             st.subheader("🎯 Key Phase Biomechanics")
-            st.caption(f"Phase-isolated metrics for clip: **{selected_vid_name}**")
+            st.caption(f"Comparing **{selected_vid_name}** against overall session baseline ({len(processed_videos)} throws).")
 
             p_data = selected_vid[2]
 
             phase_table = [
                 {
-                    "Pitching Phase": "1. Foot Contact (Stride Landing)",
+                    "Pitching Phase": "1. Foot Contact",
                     "Metric": "Lead Knee Flexion",
-                    "Measured": f"{p_data['foot_contact']['knee']}°",
+                    "Selected Clip": f"{p_data['foot_contact']['knee']}°",
+                    "Session Range & Avg": format_session_range(session_data["fc_knee"]),
                     "Benchmark": "130° – 150°"
                 },
                 {
-                    "Pitching Phase": "1. Foot Contact (Stride Landing)",
+                    "Pitching Phase": "1. Foot Contact",
                     "Metric": "Initial Trunk Tilt",
-                    "Measured": f"{p_data['foot_contact']['trunk']}°",
+                    "Selected Clip": f"{p_data['foot_contact']['trunk']}°",
+                    "Session Range & Avg": format_session_range(session_data["fc_trunk"]),
                     "Benchmark": "10° – 20°"
                 },
                 {
-                    "Pitching Phase": "2. Max Arm Layback",
+                    "Pitching Phase": "2. Max Layback",
                     "Metric": "Shoulder Abduction",
-                    "Measured": f"{p_data['max_layback']['shoulder']}°",
+                    "Selected Clip": f"{p_data['max_layback']['shoulder']}°",
+                    "Session Range & Avg": format_session_range(session_data["lb_shoulder"]),
                     "Benchmark": "85° – 100°"
                 },
                 {
-                    "Pitching Phase": "2. Max Arm Layback",
+                    "Pitching Phase": "2. Max Layback",
                     "Metric": "Elbow Flexion",
-                    "Measured": f"{p_data['max_layback']['elbow']}°",
+                    "Selected Clip": f"{p_data['max_layback']['elbow']}°",
+                    "Session Range & Avg": format_session_range(session_data["lb_elbow"]),
                     "Benchmark": "80° – 105°"
                 },
                 {
                     "Pitching Phase": "3. Ball Release Point",
                     "Metric": "Lead Knee Extension (Block)",
-                    "Measured": f"{p_data['release']['knee']}°",
+                    "Selected Clip": f"{p_data['release']['knee']}°",
+                    "Session Range & Avg": format_session_range(session_data["rel_knee"]),
                     "Benchmark": "160° – 180°"
                 },
                 {
                     "Pitching Phase": "3. Ball Release Point",
                     "Metric": "Forward Trunk Tilt",
-                    "Measured": f"{p_data['release']['trunk']}°",
+                    "Selected Clip": f"{p_data['release']['trunk']}°",
+                    "Session Range & Avg": format_session_range(session_data["rel_trunk"]),
                     "Benchmark": "35° – 50°"
                 },
             ]
