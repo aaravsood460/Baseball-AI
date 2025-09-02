@@ -179,6 +179,8 @@ def format_session_range(val_list):
 
 def generate_coaching_insights(p_data):
     alerts = []
+    
+    # 1. Lead Leg Block Check
     lead_knee_rel = p_data["release"]["knee"]
     if lead_knee_rel < 160:
         alerts.append({
@@ -195,6 +197,7 @@ def generate_coaching_insights(p_data):
             "cue": ""
         })
 
+    # 2. Shoulder Abduction Check
     shoulder_layback = p_data["max_layback"]["shoulder"]
     if shoulder_layback < 85:
         alerts.append({
@@ -204,8 +207,9 @@ def generate_coaching_insights(p_data):
             "cue": "👉 **Coaching Cue:** Keep the elbow level with the shoulder line through arm cocking."
         })
 
+    # 3. Forward Trunk Tilt Check
     trunk_rel = p_data["release"]["trunk"]
-    if trunk_rel < 30:
+    if trunk_rel < 35:
         alerts.append({
             "level": "warning",
             "title": "⚠️ Upright Finish",
@@ -241,7 +245,7 @@ if uploaded_files:
     progress_bar.empty()
 
     if processed_videos:
-        # Collect session lists
+        # Collect session lists across all videos
         session_data = {
             "fc_knee": [v[2]["foot_contact"]["knee"] for v in processed_videos],
             "fc_trunk": [v[2]["foot_contact"]["trunk"] for v in processed_videos],
@@ -317,7 +321,7 @@ if uploaded_files:
 
             # Automated Coaching Insights Section
             st.markdown("---")
-            st.subheader("💡 Automated Mechanical Diagnostics")
+            st.subheader(f"💡 Automated Mechanical Diagnostics ({selected_vid_name})")
             
             insights = generate_coaching_insights(p_data)
             for alert in insights:
