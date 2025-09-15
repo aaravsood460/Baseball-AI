@@ -18,7 +18,7 @@ st.set_page_config(
 )
 
 st.title("⚾ AI Pitching Mechanics & Biomechanics Analyzer")
-st.write("Extract critical joint angles at **Foot Contact**, **Max Layback**, and **Ball Release**, with session tracking and coaching diagnostics.")
+st.write("Extract critical joint angles at **Foot Contact**, **Max Layback**, and **Ball Release**, with individual clip and session-wide coaching diagnostics.")
 
 # -----------------------------------------------------------------------------
 # 1. Model Download & Cache
@@ -178,9 +178,10 @@ def format_session_range(val_list):
     return f"{min_v}° – {max_v}° (Avg: {avg_v}°)"
 
 def generate_coaching_insights(p_data):
+    """Generates recommendations for a single selected clip."""
     alerts = []
     
-    # 1. Lead Leg Block Check
+    # Lead Leg Block Check
     lead_knee_rel = p_data["release"]["knee"]
     if lead_knee_rel < 160:
         alerts.append({
@@ -197,7 +198,7 @@ def generate_coaching_insights(p_data):
             "cue": ""
         })
 
-    # 2. Shoulder Abduction Check
+    # Shoulder Abduction Check
     shoulder_layback = p_data["max_layback"]["shoulder"]
     if shoulder_layback < 85:
         alerts.append({
@@ -207,7 +208,7 @@ def generate_coaching_insights(p_data):
             "cue": "👉 **Coaching Cue:** Keep the elbow level with the shoulder line through arm cocking."
         })
 
-    # 3. Forward Trunk Tilt Check
+    # Forward Trunk Tilt Check
     trunk_rel = p_data["release"]["trunk"]
     if trunk_rel < 35:
         alerts.append({
@@ -215,6 +216,49 @@ def generate_coaching_insights(p_data):
             "title": "⚠️ Upright Finish",
             "msg": f"Forward trunk tilt at release is **{trunk_rel}°** (Benchmark: 35°–50°). Cutting extension short puts excess deceleration load on the throwing arm.",
             "cue": "👉 **Coaching Cue:** Drive the chest over the front knee at finish."
+        })
+
+    return alerts
+
+def generate_session_insights(session_data):
+    """Generates recommendations based on overall session averages."""
+    alerts = []
+
+    # Session Avg Lead Leg Block Check
+    avg_rel_knee = int(np.mean(session_data["rel_knee"]))
+    if avg_rel_knee < 160:
+        alerts.append({
+            "level": "warning",
+            "title": "⚠️ Systemic Trend: Soft Lead-Leg Block Across Session",
+            "msg": f"Session average lead knee extension is **{avg_rel_knee}°** (Benchmark: 160°–180°). This indicates a repeated mechanical pattern across throws.",
+            "cue": "👉 **Training Focus:** Implement lead-leg posting drills during bullpen sessions to build front-hip brace strength."
+        })
+    else:
+        alerts.append({
+            "level": "success",
+            "title": "✅ Consistent Lead-Leg Block Across Session",
+            "msg": f"Session average lead knee extension is **{avg_rel_knee}°**, demonstrating repeatable energy transfer.",
+            "cue": ""
+        })
+
+    # Session Avg Arm Slot Check
+    avg_lb_shoulder = int(np.mean(session_data["lb_shoulder"]))
+    if avg_lb_shoulder < 85:
+        alerts.append({
+            "level": "warning",
+            "title": "⚠️ Systemic Trend: Low Arm Slot / Dropped Elbow",
+            "msg": f"Session average shoulder abduction at layback is **{avg_lb_shoulder}°** (Benchmark: 85°–100°). Consistent low elbow positioning increases cumulative medial elbow strain.",
+            "cue": "👉 **Training Focus:** Work on scapular retraction and posture alignment during throw routines."
+        })
+
+    # Session Avg Trunk Tilt Check
+    avg_rel_trunk = int(np.mean(session_data["rel_trunk"]))
+    if avg_rel_trunk < 35:
+        alerts.append({
+            "level": "warning",
+            "title": "⚠️ Systemic Trend: Upright Finish Habit",
+            "msg": f"Session average forward trunk tilt is **{avg_rel_trunk}°** (Benchmark: 35°–50°). The athlete consistently cuts extension short.",
+            "cue": "👉 **Training Focus:** Focus on hip-hinge mobility and chest-over-knee deceleration drills."
         })
 
     return alerts
@@ -319,16 +363,29 @@ if uploaded_files:
 
             st.table(phase_table)
 
-            # Automated Coaching Insights Section
+            # Automated Coaching Insights Section using Tabs
             st.markdown("---")
-            st.subheader(f"💡 Automated Mechanical Diagnostics ({selected_vid_name})")
+            st.subheader("💡 Automated Mechanical Diagnostics")
             
-            insights = generate_coaching_insights(p_data)
-            for alert in insights:
-                if alert["level"] == "warning":
-                    st.warning(f"**{alert['title']}**\n\n{alert['msg']}\n\n{alert['cue']}")
-                else:
-                    st.success(f"**{alert['title']}**\n\n{alert['msg']}")
+            tab_clip, tab_session = st.tabs(["🎯 Selected Clip Analysis", "📊 Overall Session Trends"])
+
+            with tab_clip:
+                st.caption(f"Diagnostics for **{selected_vid_name}**:")
+                clip_insights = generate_coaching_insights(p_data)
+                for alert in clip_insights:
+                    if alert["level"] == "warning":
+                        st.warning(f"**{alert['title']}**\n\n{alert['msg']}\n\n{alert['cue']}")
+                    else:
+                        st.success(f"**{alert['title']}**\n\n{alert['msg']}")
+
+            with tab_session:
+                st.caption(f"Aggregated trends across all **{len(processed_videos)}** uploaded pitches:")
+                session_insights = generate_session_insights(session_data)
+                for alert in session_insights:
+                    if alert["level"] == "warning":
+                        st.warning(f"**{alert['title']}**\n\n{alert['msg']}\n\n{alert['cue']}")
+                    else:
+                        st.success(f"**{alert['title']}**\n\n{alert['msg']}")
 
 else:
     st.info("👈 Upload pitching videos to run automated key phase and mechanical diagnostics.")
