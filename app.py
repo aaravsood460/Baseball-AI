@@ -1,6 +1,6 @@
 import os
-import urllib.request
 import tempfile
+import urllib.request
 import cv2
 import numpy as np
 import streamlit as st
@@ -8,384 +8,242 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
-# -----------------------------------------------------------------------------
-# Streamlit Page Setup
-# -----------------------------------------------------------------------------
-st.set_page_config(
-    page_title="AI Pitching Mechanics Analyzer",
-    page_icon="⚾",
-    layout="wide"
-)
+# Streamlit config
+st.set_page_config(page_title="AI Pitching Mechanics Analyzer", page_icon="⚾", layout="wide")
 
 st.title("⚾ AI Pitching Mechanics & Biomechanics Analyzer")
-st.write("Extract critical joint angles at **Foot Contact**, **Max Layback**, and **Ball Release**, with individual clip and session-wide coaching diagnostics.")
+st.write("Extract critical joint angles at **Foot Contact**, **Max Layback**, and **Ball Release** across pitch sessions.")
 
-# -----------------------------------------------------------------------------
-# 1. Model Download & Cache
-# -----------------------------------------------------------------------------
+# Cache model download so it doesn't redownload every run
 @st.cache_resource
-def get_model_path():
+def load_pose_model():
     model_path = os.path.join(tempfile.gettempdir(), "pose_landmarker_full.task")
     if not os.path.exists(model_path) or os.path.getsize(model_path) < 1000000:
         url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task"
         urllib.request.urlretrieve(url, model_path)
     return model_path
 
-def calculate_angle(a, b, c):
-    """Calculates 2D interior angle (0-180 deg) between 3 joint points."""
+# Angle math helper
+def get_angle(a, b, c):
     a, b, c = np.array(a), np.array(b), np.array(c)
-    radians = np.arctan2(c[1] - b[1], c[0] - b[0]) - np.arctan2(a[1] - b[1], a[0] - b[0])
-    angle = np.abs(radians * 180.0 / np.pi)
-    if angle > 180.0:
-        angle = 360.0 - angle
-    return angle
+    rad = np.arctan2(c[1] - b[1], c[0] - b[0]) - np.arctan2(a[1] - b[1], a[0] - b[0])
+    ang = np.abs(rad * 180.0 / np.pi)
+    if ang > 180.0:
+        ang = 360.0 - ang
+    return int(ang)
 
-def process_single_video(file_bytes):
-    """Processes video, detects key pitching phases, and outputs phase metrics."""
-    model_path = get_model_path()
+def process_video(file_bytes):
+    model_path = load_pose_model()
     
-    base_options = python.BaseOptions(model_asset_path=model_path)
-    options = vision.PoseLandmarkerOptions(
-        base_options=base_options,
-        running_mode=vision.RunningMode.VIDEO
-    )
+    base_opts = python.BaseOptions(model_asset_path=model_path)
+    opts = vision.PoseLandmarkerOptions(base_options=base_opts, running_mode=vision.RunningMode.VIDEO)
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tfile:
-        tfile.write(file_bytes)
-        in_path = tfile.name
+    # Save uploaded bytes to temp file for OpenCV
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+        tmp.write(file_bytes)
+        in_path = tmp.name
 
     cap = cv2.VideoCapture(in_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps == 0 or np.isnan(fps):
-        fps = 30.0
+        fps = 30.0 # Default fallback if fps fails
 
-    out_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    out_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    if out_width == 0 or out_height == 0:
-        out_width, out_height = 720, 1280
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 720
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1280
 
     out_file = tempfile.NamedTemporaryFile(delete=False, suffix=".webm")
     out_path = out_file.name
     out_file.close()
 
+    # VP80 codec for browser compatibility in Streamlit
     fourcc = cv2.VideoWriter_fourcc(*'VP80')
-    out = cv2.VideoWriter(out_path, fourcc, fps, (out_width, out_height))
+    out = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
 
     frames_data = []
-    frame_idx = 0
+    frame_count = 0
 
-    with vision.PoseLandmarker.create_from_options(options) as landmarker:
+    with vision.PoseLandmarker.create_from_options(opts) as landmarker:
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
 
-            h, w, _ = frame.shape
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-            timestamp_ms = int((frame_idx / fps) * 1000)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            time_ms = int((frame_count / fps) * 1000)
             
-            result = landmarker.detect_for_video(mp_image, timestamp_ms)
+            res = landmarker.detect_for_video(mp_img, time_ms)
             
-            frame_metrics = {"frame": frame, "idx": frame_idx, "has_pose": False}
+            fdata = {"frame_idx": frame_count, "has_pose": False}
 
-            if result.pose_landmarks and len(result.pose_landmarks) > 0:
-                landmarks = result.pose_landmarks[0]
+            if res.pose_landmarks and len(res.pose_landmarks) > 0:
+                pts = res.pose_landmarks[0]
 
-                shoulder = [landmarks[12].x * w, landmarks[12].y * h]
-                elbow = [landmarks[14].x * w, landmarks[14].y * h]
-                wrist = [landmarks[16].x * w, landmarks[16].y * h]
-                hip = [landmarks[24].x * w, landmarks[24].y * h]
-                knee = [landmarks[26].x * w, landmarks[26].y * h]
-                ankle = [landmarks[28].x * w, landmarks[28].y * h]
+                # Key joints (MediaPipe pose indices)
+                shldr = [pts[12].x * w, pts[12].y * h]
+                elbw  = [pts[14].x * w, pts[14].y * h]
+                wrst  = [pts[16].x * w, pts[16].y * h]
+                hip   = [pts[24].x * w, pts[24].y * h]
+                knee  = [pts[26].x * w, pts[26].y * h]
+                ankl  = [pts[28].x * w, pts[28].y * h]
 
-                elbow_angle = int(calculate_angle(shoulder, elbow, wrist))
-                knee_angle = int(calculate_angle(hip, knee, ankle))
-                shoulder_angle = int(calculate_angle(hip, shoulder, elbow))
-                trunk_tilt = int(180.0 - calculate_angle(shoulder, hip, knee))
+                # Angle calculations
+                elbow_ang  = get_angle(shldr, elbw, wrst)
+                knee_ang   = get_angle(hip, knee, ankl)
+                shldr_ang  = get_angle(hip, shldr, elbw)
+                trunk_tilt = 180 - get_angle(shldr, hip, knee)
 
-                frame_metrics.update({
+                fdata.update({
                     "has_pose": True,
-                    "elbow": elbow_angle,
-                    "knee": knee_angle,
-                    "shoulder": shoulder_angle,
+                    "elbow": elbow_ang,
+                    "knee": knee_ang,
+                    "shoulder": shldr_ang,
                     "trunk": trunk_tilt,
-                    "wrist_x": wrist[0],
-                    "ankle_y": ankle[1]
+                    "wrist_x": wrst[0],
+                    "ankle_y": ankl[1]
                 })
 
-                # Visual annotations
-                cv2.line(frame, (int(shoulder[0]), int(shoulder[1])), (int(elbow[0]), int(elbow[1])), (0, 255, 0), 3)
-                cv2.line(frame, (int(elbow[0]), int(elbow[1])), (int(wrist[0]), int(wrist[1])), (0, 255, 0), 3)
+                # Draw skeleton overlay
+                cv2.line(frame, (int(shldr[0]), int(shldr[1])), (int(elbw[0]), int(elbw[1])), (0, 255, 0), 3)
+                cv2.line(frame, (int(elbw[0]), int(elbw[1])), (int(wrst[0]), int(wrst[1])), (0, 255, 0), 3)
                 cv2.line(frame, (int(hip[0]), int(hip[1])), (int(knee[0]), int(knee[1])), (255, 0, 0), 3)
-                cv2.line(frame, (int(knee[0]), int(knee[1])), (int(ankle[0]), int(ankle[1])), (255, 0, 0), 3)
+                cv2.line(frame, (int(knee[0]), int(knee[1])), (int(ankl[0]), int(ankl[1])), (255, 0, 0), 3)
 
-                for lm in [shoulder, elbow, wrist, hip, knee, ankle]:
-                    cv2.circle(frame, (int(lm[0]), int(lm[1])), 6, (0, 0, 255), -1)
+                for p in [shldr, elbw, wrst, hip, knee, ankl]:
+                    cv2.circle(frame, (int(p[0]), int(p[1])), 6, (0, 0, 255), -1)
 
             out.write(frame)
-            frames_data.append(frame_metrics)
-            frame_idx += 1
+            frames_data.append(fdata)
+            frame_count += 1
 
     cap.release()
     out.release()
     if os.path.exists(in_path):
         os.remove(in_path)
 
-    # -------------------------------------------------------------------------
-    # Key Phase Identification
-    # -------------------------------------------------------------------------
-    valid_frames = [f for f in frames_data if f["has_pose"]]
+    # Phase detection logic
+    valid = [f for f in frames_data if f["has_pose"]]
     
-    if len(valid_frames) > 5:
-        wrist_velocities = [valid_frames[i]["wrist_x"] - valid_frames[i-1]["wrist_x"] for i in range(1, len(valid_frames))]
-        release_idx = np.argmax(wrist_velocities) + 1
-        release_frame = valid_frames[release_idx]
+    if len(valid) > 5:
+        # Release frame = max forward wrist speed
+        wrist_vels = [valid[i]["wrist_x"] - valid[i-1]["wrist_x"] for i in range(1, len(valid))]
+        rel_idx = np.argmax(wrist_vels) + 1
+        rel_f = valid[rel_idx]
 
-        pre_release_frames = valid_frames[max(0, release_idx - 15):release_idx]
-        layback_frame = max(pre_release_frames, key=lambda x: x["shoulder"]) if pre_release_frames else release_frame
+        # Max Layback = peak shoulder abduction right before release
+        pre_rel = valid[max(0, rel_idx - 15):rel_idx]
+        lay_f = max(pre_rel, key=lambda x: x["shoulder"]) if pre_rel else rel_f
 
-        early_frames = valid_frames[:max(1, release_idx - 10)]
-        foot_contact_frame = max(early_frames, key=lambda x: x["ankle_y"]) if early_frames else release_frame
+        # Foot Contact = lowest ankle position early in delivery
+        early_f = valid[:max(1, rel_idx - 10)]
+        fc_f = max(early_f, key=lambda x: x["ankle_y"]) if early_f else rel_f
     else:
-        default_f = valid_frames[0] if valid_frames else {"elbow": 0, "shoulder": 0, "knee": 0, "trunk": 0}
-        foot_contact_frame = layback_frame = release_frame = default_f
+        # Fallback if video is too short or pose lost
+        fb = valid[0] if valid else {"elbow": 0, "shoulder": 0, "knee": 0, "trunk": 0}
+        fc_f = lay_f = rel_f = fb
 
-    phase_metrics = {
-        "foot_contact": {
-            "knee": foot_contact_frame.get("knee", 0),
-            "trunk": foot_contact_frame.get("trunk", 0)
-        },
-        "max_layback": {
-            "shoulder": layback_frame.get("shoulder", 0),
-            "elbow": layback_frame.get("elbow", 0)
-        },
-        "release": {
-            "knee": release_frame.get("knee", 0),
-            "trunk": release_frame.get("trunk", 0),
-            "elbow": release_frame.get("elbow", 0)
-        }
+    phases = {
+        "foot_contact": {"knee": fc_f.get("knee", 0), "trunk": fc_f.get("trunk", 0)},
+        "max_layback":  {"shoulder": lay_f.get("shoulder", 0), "elbow": lay_f.get("elbow", 0)},
+        "release":      {"knee": rel_f.get("knee", 0), "trunk": rel_f.get("trunk", 0), "elbow": rel_f.get("elbow", 0)}
     }
 
-    return out_path, phase_metrics
+    return out_path, phases
 
-def format_session_range(val_list):
-    if not val_list:
+def format_range(vals):
+    if not vals:
         return "N/A"
-    if len(val_list) == 1:
-        return f"{val_list[0]}°"
-    min_v, max_v, avg_v = min(val_list), max(val_list), int(np.mean(val_list))
-    return f"{min_v}° – {max_v}° (Avg: {avg_v}°)"
+    if len(vals) == 1:
+        return f"{vals[0]}°"
+    return f"{min(vals)}° – {max(vals)}° (Avg: {int(np.mean(vals))}°)"
 
-def generate_coaching_insights(p_data):
-    """Generates recommendations for a single selected clip."""
-    alerts = []
+# --- UI Setup ---
+uploads = st.sidebar.file_uploader("Upload Pitching Videos", type=["mp4", "mov", "avi"], accept_multiple_files=True)
+
+if uploads:
+    processed = []
+    pbar = st.progress(0, text="Processing pitching phases...")
     
-    # Lead Leg Block Check
-    lead_knee_rel = p_data["release"]["knee"]
-    if lead_knee_rel < 160:
-        alerts.append({
-            "level": "warning",
-            "title": "⚠️ Soft Lead-Leg Block",
-            "msg": f"Lead knee extension at release is **{lead_knee_rel}°** (Benchmark: 160°–180°). The front leg is absorbing energy instead of driving rotational power into ball release.",
-            "cue": "👉 **Coaching Cue:** Focus on 'posting up' firm on the front heel through release."
-        })
-    else:
-        alerts.append({
-            "level": "success",
-            "title": "✅ Strong Lead-Leg Block",
-            "msg": f"Lead knee extension at release is solid (**{lead_knee_rel}°**), transferring linear momentum effectively into rotational energy.",
-            "cue": ""
-        })
-
-    # Shoulder Abduction Check
-    shoulder_layback = p_data["max_layback"]["shoulder"]
-    if shoulder_layback < 85:
-        alerts.append({
-            "level": "warning",
-            "title": "⚠️ Dropped Elbow / Low Arm Slot",
-            "msg": f"Shoulder abduction at max layback is **{shoulder_layback}°** (Benchmark: 85°–100°). A dropped elbow increases medial stress on the elbow joint.",
-            "cue": "👉 **Coaching Cue:** Keep the elbow level with the shoulder line through arm cocking."
-        })
-
-    # Forward Trunk Tilt Check
-    trunk_rel = p_data["release"]["trunk"]
-    if trunk_rel < 35:
-        alerts.append({
-            "level": "warning",
-            "title": "⚠️ Upright Finish",
-            "msg": f"Forward trunk tilt at release is **{trunk_rel}°** (Benchmark: 35°–50°). Cutting extension short puts excess deceleration load on the throwing arm.",
-            "cue": "👉 **Coaching Cue:** Drive the chest over the front knee at finish."
-        })
-
-    return alerts
-
-def generate_session_insights(session_data):
-    """Generates recommendations based on overall session averages."""
-    alerts = []
-
-    # Session Avg Lead Leg Block Check
-    avg_rel_knee = int(np.mean(session_data["rel_knee"]))
-    if avg_rel_knee < 160:
-        alerts.append({
-            "level": "warning",
-            "title": "⚠️ Systemic Trend: Soft Lead-Leg Block Across Session",
-            "msg": f"Session average lead knee extension is **{avg_rel_knee}°** (Benchmark: 160°–180°). This indicates a repeated mechanical pattern across throws.",
-            "cue": "👉 **Training Focus:** Implement lead-leg posting drills during bullpen sessions to build front-hip brace strength."
-        })
-    else:
-        alerts.append({
-            "level": "success",
-            "title": "✅ Consistent Lead-Leg Block Across Session",
-            "msg": f"Session average lead knee extension is **{avg_rel_knee}°**, demonstrating repeatable energy transfer.",
-            "cue": ""
-        })
-
-    # Session Avg Arm Slot Check
-    avg_lb_shoulder = int(np.mean(session_data["lb_shoulder"]))
-    if avg_lb_shoulder < 85:
-        alerts.append({
-            "level": "warning",
-            "title": "⚠️ Systemic Trend: Low Arm Slot / Dropped Elbow",
-            "msg": f"Session average shoulder abduction at layback is **{avg_lb_shoulder}°** (Benchmark: 85°–100°). Consistent low elbow positioning increases cumulative medial elbow strain.",
-            "cue": "👉 **Training Focus:** Work on scapular retraction and posture alignment during throw routines."
-        })
-
-    # Session Avg Trunk Tilt Check
-    avg_rel_trunk = int(np.mean(session_data["rel_trunk"]))
-    if avg_rel_trunk < 35:
-        alerts.append({
-            "level": "warning",
-            "title": "⚠️ Systemic Trend: Upright Finish Habit",
-            "msg": f"Session average forward trunk tilt is **{avg_rel_trunk}°** (Benchmark: 35°–50°). The athlete consistently cuts extension short.",
-            "cue": "👉 **Training Focus:** Focus on hip-hinge mobility and chest-over-knee deceleration drills."
-        })
-
-    return alerts
-
-# -----------------------------------------------------------------------------
-# 2. Streamlit UI Logic
-# -----------------------------------------------------------------------------
-uploaded_files = st.sidebar.file_uploader(
-    "Upload Pitching Videos (1 or Multiple)", 
-    type=["mp4", "mov", "avi"], 
-    accept_multiple_files=True
-)
-
-if uploaded_files:
-    processed_videos = []
-
-    progress_bar = st.progress(0, text="Processing pitching phases & aggregating metrics...")
-    
-    for idx, uploaded_file in enumerate(uploaded_files):
+    for i, file in enumerate(uploads):
         try:
-            out_path, phases = process_single_video(uploaded_file.read())
-            processed_videos.append((uploaded_file.name, out_path, phases))
+            out_path, phases = process_video(file.read())
+            processed.append((file.name, out_path, phases))
         except Exception as e:
-            st.error(f"Error processing {uploaded_file.name}: {e}")
+            st.error(f"Error reading {file.name}: {e}")
 
-        progress_bar.progress(int(((idx + 1) / len(uploaded_files)) * 100))
+        pbar.progress(int(((i + 1) / len(uploads)) * 100))
 
-    progress_bar.empty()
+    pbar.empty()
 
-    if processed_videos:
-        # Collect session lists across all videos
-        session_data = {
-            "fc_knee": [v[2]["foot_contact"]["knee"] for v in processed_videos],
-            "fc_trunk": [v[2]["foot_contact"]["trunk"] for v in processed_videos],
-            "lb_shoulder": [v[2]["max_layback"]["shoulder"] for v in processed_videos],
-            "lb_elbow": [v[2]["max_layback"]["elbow"] for v in processed_videos],
-            "rel_knee": [v[2]["release"]["knee"] for v in processed_videos],
-            "rel_trunk": [v[2]["release"]["trunk"] for v in processed_videos],
+    if processed:
+        # Session metrics aggregation
+        session = {
+            "fc_knee":     [v[2]["foot_contact"]["knee"] for v in processed],
+            "fc_trunk":    [v[2]["foot_contact"]["trunk"] for v in processed],
+            "lb_shoulder": [v[2]["max_layback"]["shoulder"] for v in processed],
+            "lb_elbow":    [v[2]["max_layback"]["elbow"] for v in processed],
+            "rel_knee":    [v[2]["release"]["knee"] for v in processed],
+            "rel_trunk":   [v[2]["release"]["trunk"] for v in processed],
         }
 
-        col_video, col_summary = st.columns([1, 1])
+        col1, col2 = st.columns([1, 1])
 
-        with col_video:
-            st.subheader("📺 Processed Video Clips")
-            selected_vid_name = st.selectbox(
-                "Select clip to inspect:", 
-                options=[vid[0] for vid in processed_videos]
-            )
-            selected_vid = next(item for item in processed_videos if item[0] == selected_vid_name)
+        with col1:
+            st.subheader("📺 Processed Clips")
+            selected_name = st.selectbox("Select clip:", options=[v[0] for v in processed])
+            selected_vid = next(v for v in processed if v[0] == selected_name)
             st.video(selected_vid[1], format="video/webm")
 
-        with col_summary:
+        with col2:
             st.subheader("🎯 Key Phase Biomechanics")
-            st.caption(f"Comparing **{selected_vid_name}** against overall session baseline ({len(processed_videos)} throws).")
-
             p_data = selected_vid[2]
 
-            phase_table = [
-                {
-                    "Pitching Phase": "1. Foot Contact",
-                    "Metric": "Lead Knee Flexion",
-                    "Selected Clip": f"{p_data['foot_contact']['knee']}°",
-                    "Session Range & Avg": format_session_range(session_data["fc_knee"]),
-                    "Benchmark": "130° – 150°"
-                },
-                {
-                    "Pitching Phase": "1. Foot Contact",
-                    "Metric": "Initial Trunk Tilt",
-                    "Selected Clip": f"{p_data['foot_contact']['trunk']}°",
-                    "Session Range & Avg": format_session_range(session_data["fc_trunk"]),
-                    "Benchmark": "10° – 20°"
-                },
-                {
-                    "Pitching Phase": "2. Max Layback",
-                    "Metric": "Shoulder Abduction",
-                    "Selected Clip": f"{p_data['max_layback']['shoulder']}°",
-                    "Session Range & Avg": format_session_range(session_data["lb_shoulder"]),
-                    "Benchmark": "85° – 100°"
-                },
-                {
-                    "Pitching Phase": "2. Max Layback",
-                    "Metric": "Elbow Flexion",
-                    "Selected Clip": f"{p_data['max_layback']['elbow']}°",
-                    "Session Range & Avg": format_session_range(session_data["lb_elbow"]),
-                    "Benchmark": "80° – 105°"
-                },
-                {
-                    "Pitching Phase": "3. Ball Release Point",
-                    "Metric": "Lead Knee Extension (Block)",
-                    "Selected Clip": f"{p_data['release']['knee']}°",
-                    "Session Range & Avg": format_session_range(session_data["rel_knee"]),
-                    "Benchmark": "160° – 180°"
-                },
-                {
-                    "Pitching Phase": "3. Ball Release Point",
-                    "Metric": "Forward Trunk Tilt",
-                    "Selected Clip": f"{p_data['release']['trunk']}°",
-                    "Session Range & Avg": format_session_range(session_data["rel_trunk"]),
-                    "Benchmark": "35° – 50°"
-                },
+            table_data = [
+                {"Phase": "1. Foot Contact", "Metric": "Lead Knee Flexion", "Selected": f"{p_data['foot_contact']['knee']}°", "Session Range": format_range(session["fc_knee"]), "Benchmark": "130° – 150°"},
+                {"Phase": "1. Foot Contact", "Metric": "Initial Trunk Tilt", "Selected": f"{p_data['foot_contact']['trunk']}°", "Session Range": format_range(session["fc_trunk"]), "Benchmark": "10° – 20°"},
+                {"Phase": "2. Max Layback",  "Metric": "Shoulder Abduction", "Selected": f"{p_data['max_layback']['shoulder']}°", "Session Range": format_range(session["lb_shoulder"]), "Benchmark": "85° – 100°"},
+                {"Phase": "2. Max Layback",  "Metric": "Elbow Flexion", "Selected": f"{p_data['max_layback']['elbow']}°", "Session Range": format_range(session["lb_elbow"]), "Benchmark": "80° – 105°"},
+                {"Phase": "3. Ball Release", "Metric": "Lead Knee Extension", "Selected": f"{p_data['release']['knee']}°", "Session Range": format_range(session["rel_knee"]), "Benchmark": "160° – 180°"},
+                {"Phase": "3. Ball Release", "Metric": "Forward Trunk Tilt", "Selected": f"{p_data['release']['trunk']}°", "Session Range": format_range(session["rel_trunk"]), "Benchmark": "35° – 50°"},
             ]
+            st.table(table_data)
 
-            st.table(phase_table)
-
-            # Automated Coaching Insights Section using Tabs
             st.markdown("---")
-            st.subheader("💡 Automated Mechanical Diagnostics")
+            st.subheader("💡 Automated Diagnostics")
             
-            tab_clip, tab_session = st.tabs(["🎯 Selected Clip Analysis", "📊 Overall Session Trends"])
+            t1, t2 = st.tabs(["Selected Clip", "Overall Session"])
 
-            with tab_clip:
-                st.caption(f"Diagnostics for **{selected_vid_name}**:")
-                clip_insights = generate_coaching_insights(p_data)
-                for alert in clip_insights:
-                    if alert["level"] == "warning":
-                        st.warning(f"**{alert['title']}**\n\n{alert['msg']}\n\n{alert['cue']}")
-                    else:
-                        st.success(f"**{alert['title']}**\n\n{alert['msg']}")
+            with t1:
+                # Clip feedback
+                knee_rel = p_data["release"]["knee"]
+                if knee_rel < 160:
+                    st.warning(f"**⚠️ Soft Lead-Leg Block ({knee_rel}°)**\n\nFront leg isn't transferring max rotational force at release.\n\n👉 *Cue: Firm up on front heel at release.*")
+                else:
+                    st.success(f"**✅ Strong Lead-Leg Block ({knee_rel}°)**")
 
-            with tab_session:
-                st.caption(f"Aggregated trends across all **{len(processed_videos)}** uploaded pitches:")
-                session_insights = generate_session_insights(session_data)
-                for alert in session_insights:
-                    if alert["level"] == "warning":
-                        st.warning(f"**{alert['title']}**\n\n{alert['msg']}\n\n{alert['cue']}")
-                    else:
-                        st.success(f"**{alert['title']}**\n\n{alert['msg']}")
+                shldr_lay = p_data["max_layback"]["shoulder"]
+                if shldr_lay < 85:
+                    st.warning(f"**⚠️ Low Arm Slot ({shldr_lay}°)**\n\nElbow is below shoulder line at layback, increasing joint stress.\n\n👉 *Cue: Keep elbow level with shoulder line.*")
+
+                trunk_rel = p_data["release"]["trunk"]
+                if trunk_rel < 35:
+                    st.warning(f"**⚠️ Upright Finish ({trunk_rel}°)**\n\nCutting forward extension short puts extra load on arm deceleration.\n\n👉 *Cue: Drive chest over front knee.*")
+
+            with t2:
+                # Session feedback
+                avg_knee = int(np.mean(session["rel_knee"]))
+                if avg_knee < 160:
+                    st.warning(f"**⚠️ Session Trend: Soft Lead Block (Avg: {avg_knee}°)**\n\nConsistent pattern across pitches. Work on lead-leg posting drills.")
+                else:
+                    st.success(f"**✅ Consistent Session Lead Block (Avg: {avg_knee}°)**")
+
+                avg_shldr = int(np.mean(session["lb_shoulder"]))
+                if avg_shldr < 85:
+                    st.warning(f"**⚠️ Session Trend: Low Arm Slot (Avg: {avg_shldr}°)**\n\nRepeated low elbow slot increases cumulative stress.")
+
+                avg_trunk = int(np.mean(session["rel_trunk"]))
+                if avg_trunk < 35:
+                    st.warning(f"**⚠️ Session Trend: Upright Finish (Avg: {avg_trunk}°)**\n\nConsistently cutting extension short. Focus on hip-hinge mobility.")
 
 else:
-    st.info("👈 Upload pitching videos to run automated key phase and mechanical diagnostics.")
+    st.info("👈 Upload videos in sidebar to begin analysis.")
