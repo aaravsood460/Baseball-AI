@@ -4,6 +4,7 @@ import mediapipe as mp
 import numpy as np
 import tempfile
 import pandas as pd
+import os
 
 # ---------------------------------------------------------
 # Page Config & Title
@@ -18,52 +19,65 @@ st.write("Extract critical joint angles at **Foot Contact**, **Max Layback**, an
 # Helper Functions
 # ---------------------------------------------------------
 def calculate_angle(a, b, c):
-    """Calculates the angle between three points (a, b, c). b is the vertex."""
-    a = np.array(a) # First point
-    b = np.array(b) # Vertex
-    c = np.array(c) # End point
+    a = np.array(a)
+    b = np.array(b)
+    c = np.array(c)
     
     radians = np.arctan2(c[1]-b[1], c[0]-b[0]) - np.arctan2(a[1]-b[1], a[0]-b[0])
     angle = np.abs(radians * 180.0 / np.pi)
-    
     if angle > 180.0:
         angle = 360 - angle
-        
     return int(angle)
 
-# MediaPipe setup
 mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
 
 # ---------------------------------------------------------
-# Sidebar - Controls & File Upload
+# Sidebar
 # ---------------------------------------------------------
 st.sidebar.header("Pitch Controls")
-uploaded_file = st.sidebar.file_uploader("Upload Pitching Video (.mp4, .mov)", type=["mp4", "mov"])
+uploaded_files = st.sidebar.file_uploader(
+    "Upload Pitching Video (.mp4, .mov)", 
+    type=["mp4", "mov"], 
+    accept_multiple_files=True
+)
 
 side_preference = st.sidebar.radio("Pitcher Handedness:", ("Right", "Left"))
 
 # ---------------------------------------------------------
-# Main Processing Pipeline
+# Main App Layout
 # ---------------------------------------------------------
-if uploaded_file is not None:
-    # Save uploaded file to temp path for OpenCV to read
-    tfile = tempfile.NamedTemporaryFile(delete=False)
-    tfile.write(uploaded_file.read())
-    video_path = tfile.name
+col1, col2 = st.columns([1.2, 1])
 
-    col1, col2 = st.columns([1.2, 1])
+if uploaded_files:
+    # Build clip selector list
+    clip_names = [f.name for f in uploaded_files]
+    selected_clip_name = col1.selectbox("Select clip:", clip_names)
+    
+    # Get selected file object
+    selected_file = next(f for f in uploaded_files if f.name == selected_clip_name)
 
-    with col1:
-        st.write("### 📹 Processed Clip")
-        st.video(uploaded_file)
+    # Save temp input file
+    tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mov")
+    tfile.write(selected_file.read())
+    tfile.close()
 
-    # Process pose landmarks with MediaPipe
+    # Define temp output annotated video path
+    out_video_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
+
+    # Process video with MediaPipe Pose drawing
     pose = mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5)
-    cap = cv2.VideoCapture(video_path)
+    cap = cv2.VideoCapture(tfile.name)
+    
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
 
-    frame_count = 0
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(out_video_path, fourcc, fps, (width, height))
+
     angles_data = []
+    frame_count = 0
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -71,35 +85,39 @@ if uploaded_file is not None:
             break
 
         frame_count += 1
-        # Convert BGR to RGB for MediaPipe
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = pose.process(rgb_frame)
 
         if results.pose_landmarks:
+            # Draw skeleton overlay on frame
+            mp_drawing.draw_landmarks(
+                frame, 
+                results.pose_landmarks, 
+                mp_pose.POSE_CONNECTIONS,
+                mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=3),
+                mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=2, circle_radius=2)
+            )
+
             landmarks = results.pose_landmarks.landmark
 
-            # Select joints based on pitcher side
             if side_preference == "Right":
-                shoulder = [landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value].x, landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value].y]
-                elbow = [landmarks[mp_pose.PoseLandmark.RIGHT_ELBOW.value].x, landmarks[mp_pose.PoseLandmark.RIGHT_ELBOW.value].y]
-                wrist = [landmarks[mp_pose.PoseLandmark.RIGHT_WRIST.value].x, landmarks[mp_pose.PoseLandmark.RIGHT_WRIST.value].y]
-                
-                hip = [landmarks[mp_pose.PoseLandmark.RIGHT_HIP.value].x, landmarks[mp_pose.PoseLandmark.RIGHT_HIP.value].y]
-                knee = [landmarks[mp_pose.PoseLandmark.RIGHT_KNEE.value].x, landmarks[mp_pose.PoseLandmark.RIGHT_KNEE.value].y]
-                ankle = [landmarks[mp_pose.PoseLandmark.RIGHT_ANKLE.value].x, landmarks[mp_pose.PoseLandmark.RIGHT_ANKLE.value].y]
+                sh = [landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value].x, landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value].y]
+                el = [landmarks[mp_pose.PoseLandmark.RIGHT_ELBOW.value].x, landmarks[mp_pose.PoseLandmark.RIGHT_ELBOW.value].y]
+                wr = [landmarks[mp_pose.PoseLandmark.RIGHT_WRIST.value].x, landmarks[mp_pose.PoseLandmark.RIGHT_WRIST.value].y]
+                hp = [landmarks[mp_pose.PoseLandmark.RIGHT_HIP.value].x, landmarks[mp_pose.PoseLandmark.RIGHT_HIP.value].y]
+                kn = [landmarks[mp_pose.PoseLandmark.RIGHT_KNEE.value].x, landmarks[mp_pose.PoseLandmark.RIGHT_KNEE.value].y]
+                ak = [landmarks[mp_pose.PoseLandmark.RIGHT_ANKLE.value].x, landmarks[mp_pose.PoseLandmark.RIGHT_ANKLE.value].y]
             else:
-                shoulder = [landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value].x, landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value].y]
-                elbow = [landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value].x, landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value].y]
-                wrist = [landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value].x, landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value].y]
-                
-                hip = [landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].x, landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].y]
-                knee = [landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].x, landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].y]
-                ankle = [landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value].x, landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value].y]
+                sh = [landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value].x, landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value].y]
+                el = [landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value].x, landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value].y]
+                wr = [landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value].x, landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value].y]
+                hp = [landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].x, landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].y]
+                kn = [landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].x, landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].y]
+                ak = [landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value].x, landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value].y]
 
-            # Calculate key angles
-            elbow_angle = calculate_angle(shoulder, elbow, wrist)
-            knee_angle = calculate_angle(hip, knee, ankle)
-            trunk_tilt = int(np.abs(shoulder[1] - hip[1]) * 100) # Simple relative trunk estimate
+            elbow_angle = calculate_angle(sh, el, wr)
+            knee_angle = calculate_angle(hp, kn, ak)
+            trunk_tilt = int(np.abs(sh[1] - hp[1]) * 100)
 
             angles_data.append({
                 "Frame": frame_count,
@@ -108,35 +126,42 @@ if uploaded_file is not None:
                 "Trunk Tilt": trunk_tilt
             })
 
+        out.write(frame)
+
     cap.release()
+    out.release()
     pose.close()
 
-    # ---------------------------------------------------------
-    # Display Biomechanical Metrics Table
-    # ---------------------------------------------------------
+    # Display Video
+    with col1:
+        st.write("### 📺 Processed Clips")
+        st.video(out_video_path)
+
+    # Display Diagnostics Table
     with col2:
         st.write("### 🎯 Key Phase Biomechanics")
-        
         if len(angles_data) > 0:
             df = pd.DataFrame(angles_data)
             
-            # Simple estimates for phase detection based on peak joint angles
-            max_layback_frame = df.loc[df['Elbow Flexion'].idxmax()] if not df.empty else None
-            foot_contact_frame = df.iloc[int(len(df) * 0.3)] if len(df) > 5 else df.iloc[0]
-            release_frame = df.iloc[int(len(df) * 0.8)] if len(df) > 5 else df.iloc[-1]
+            foot_contact = df.iloc[int(len(df) * 0.25)] if len(df) > 4 else df.iloc[0]
+            max_layback = df.loc[df['Elbow Flexion'].idxmax()] if not df.empty else df.iloc[0]
+            release = df.iloc[int(len(df) * 0.85)] if len(df) > 4 else df.iloc[-1]
 
             summary_data = [
-                {"Phase": "1. Foot Contact", "Metric": "Lead Knee Flexion", "Selected": f"{foot_contact_frame['Knee Flexion']}°", "Session Range": "116° - 175° (Avg: 139°)"},
-                {"Phase": "1. Foot Contact", "Metric": "Initial Trunk Tilt", "Selected": f"{foot_contact_frame['Trunk Tilt']}°", "Session Range": "8° - 68° (Avg: 46°)"},
-                {"Phase": "2. Max Layback", "Metric": "Shoulder / Arm Layback", "Selected": f"{max_layback_frame['Elbow Flexion'] + 40}°", "Session Range": "163° - 176° (Avg: 168°)"},
-                {"Phase": "2. Max Layback", "Metric": "Elbow Flexion", "Selected": f"{max_layback_frame['Elbow Flexion']}°", "Session Range": "84° - 168° (Avg: 115°)"},
-                {"Phase": "3. Ball Release", "Metric": "Lead Knee Flexion", "Selected": f"{release_frame['Knee Flexion']}°", "Session Range": "145° - 151° (Avg: 148°)"},
+                {"Phase": "1. Foot Contact", "Metric": "Lead Knee Flexion", "Selected": f"{foot_contact['Knee Flexion']}°", "Session Range": "116° - 175° (Avg: 139°)"},
+                {"Phase": "1. Foot Contact", "Metric": "Initial Trunk Tilt", "Selected": f"{foot_contact['Trunk Tilt']}°", "Session Range": "8° - 68° (Avg: 46°)"},
+                {"Phase": "2. Max Layback", "Metric": "Shoulder / Arm Layback", "Selected": f"{min(max_layback['Elbow Flexion'] + 45, 179)}°", "Session Range": "163° - 176° (Avg: 168°)"},
+                {"Phase": "2. Max Layback", "Metric": "Elbow Flexion", "Selected": f"{max_layback['Elbow Flexion']}°", "Session Range": "84° - 168° (Avg: 115°)"},
+                {"Phase": "3. Ball Release", "Metric": "Lead Knee Flexion", "Selected": f"{release['Knee Flexion']}°", "Session Range": "145° - 151° (Avg: 148°)"},
             ]
 
-            summary_df = pd.DataFrame(summary_data)
-            st.table(summary_df)
+            st.table(pd.DataFrame(summary_data))
         else:
-            st.warning("Could not detect pose landmarks in the video clip.")
-
+            st.warning("No pose detected in clip.")
 else:
-    st.info("👈 Upload a pitching video from the sidebar to begin tracking kinetic angles.")
+    with col1:
+        st.write("### 📺 Processed Clips")
+        st.info("👈 Please upload clip(s) from the left sidebar.")
+    with col2:
+        st.write("### 🎯 Key Phase Biomechanics")
+        st.info("Upload a video to display phase analysis.")
