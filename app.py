@@ -7,7 +7,7 @@ import pandas as pd
 import os
 
 # ---------------------------------------------------------
-# Page Config & Title
+# Page Configuration
 # ---------------------------------------------------------
 st.set_page_config(page_title="PitchPerfect AI", page_icon="⚾", layout="wide")
 
@@ -19,21 +19,16 @@ st.write("Extract critical joint angles at **Foot Contact**, **Max Layback**, an
 # Helper Functions
 # ---------------------------------------------------------
 def calculate_angle(a, b, c):
-    a = np.array(a)
-    b = np.array(b)
-    c = np.array(c)
-    
+    a, b, c = np.array(a), np.array(b), np.array(c)
     radians = np.arctan2(c[1]-b[1], c[0]-b[0]) - np.arctan2(a[1]-b[1], a[0]-b[0])
     angle = np.abs(radians * 180.0 / np.pi)
-    if angle > 180.0:
-        angle = 360 - angle
-    return int(angle)
+    return int(360 - angle if angle > 180.0 else angle)
 
 mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
 
 # ---------------------------------------------------------
-# Sidebar
+# Sidebar Controls
 # ---------------------------------------------------------
 st.sidebar.header("Pitch Controls")
 uploaded_files = st.sidebar.file_uploader(
@@ -45,36 +40,24 @@ uploaded_files = st.sidebar.file_uploader(
 side_preference = st.sidebar.radio("Pitcher Handedness:", ("Right", "Left"))
 
 # ---------------------------------------------------------
-# Main App Layout
+# Main Application Processing
 # ---------------------------------------------------------
-col1, col2 = st.columns([1.2, 1])
-
 if uploaded_files:
-    # Build clip selector list
+    col1, col2 = st.columns([1.2, 1])
+
     clip_names = [f.name for f in uploaded_files]
     selected_clip_name = col1.selectbox("Select clip:", clip_names)
-    
-    # Get selected file object
     selected_file = next(f for f in uploaded_files if f.name == selected_clip_name)
 
-    # Save temp input file
+    # Save uploaded file to temp location
+    selected_file.seek(0)
     tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mov")
     tfile.write(selected_file.read())
     tfile.close()
 
-    # Define temp output annotated video path
-    out_video_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
-
-    # Process video with MediaPipe Pose drawing
+    # Process video landmarks
     pose = mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5)
     cap = cv2.VideoCapture(tfile.name)
-    
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
-
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(out_video_path, fourcc, fps, (width, height))
 
     angles_data = []
     frame_count = 0
@@ -89,15 +72,6 @@ if uploaded_files:
         results = pose.process(rgb_frame)
 
         if results.pose_landmarks:
-            # Draw skeleton overlay on frame
-            mp_drawing.draw_landmarks(
-                frame, 
-                results.pose_landmarks, 
-                mp_pose.POSE_CONNECTIONS,
-                mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=3),
-                mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=2, circle_radius=2)
-            )
-
             landmarks = results.pose_landmarks.landmark
 
             if side_preference == "Right":
@@ -126,18 +100,16 @@ if uploaded_files:
                 "Trunk Tilt": trunk_tilt
             })
 
-        out.write(frame)
-
     cap.release()
-    out.release()
     pose.close()
 
-    # Display Video
+    # Left Column: Render Video Directly
     with col1:
         st.write("### 📺 Processed Clips")
-        st.video(out_video_path)
+        selected_file.seek(0)
+        st.video(selected_file.read())
 
-    # Display Diagnostics Table
+    # Right Column: Biomechanics Metrics & Averages
     with col2:
         st.write("### 🎯 Key Phase Biomechanics")
         if len(angles_data) > 0:
@@ -156,12 +128,20 @@ if uploaded_files:
             ]
 
             st.table(pd.DataFrame(summary_data))
+
+            # Delivery Diagnostics Section
+            st.write("### 💡 AI Diagnostics & Feedback")
+            if foot_contact['Knee Flexion'] > 150:
+                st.warning("⚠️ **Lead Knee Flexion High:** Stiff landing detected at foot contact. Consider bending front knee to absorb energy.")
+            else:
+                st.success("✅ **Good Landing Mechanics:** Front leg bracing is within optimal kinematic range.")
+
+            if max_layback['Elbow Flexion'] < 90:
+                st.warning("⚠️ **Elbow Flexion Low:** Arm angle is tight at layback. Maintain ~90° to optimize arm speed and reduce torque on elbow.")
+            else:
+                st.info("ℹ️ **Layback Positioning:** Excellent external rotation during phase 2.")
         else:
-            st.warning("No pose detected in clip.")
+            st.warning("No pose landmarks detected in this video clip.")
+
 else:
-    with col1:
-        st.write("### 📺 Processed Clips")
-        st.info("👈 Please upload clip(s) from the left sidebar.")
-    with col2:
-        st.write("### 🎯 Key Phase Biomechanics")
-        st.info("Upload a video to display phase analysis.")
+    st.info("👈 Upload pitching videos from the sidebar to start delivery analysis.")
